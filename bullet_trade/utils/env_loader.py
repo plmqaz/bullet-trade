@@ -238,6 +238,9 @@ def get_risk_control_config() -> dict:
         - max_order_value: 单笔订单最大金额（元）
         - max_daily_trade_value: 单日最大交易金额（元）
         - max_daily_trades: 单日最大交易次数
+        - max_daily_cancels: 单日最大撤单次数
+        - min_cancel_interval_seconds: 撤单最小时间间隔
+        - max_cancel_per_order: 单笔订单最大撤单尝试次数
         - max_stock_count: 最大持仓股票数
         - max_position_ratio: 单只股票最大仓位（%）
         - stop_loss_ratio: 止损比例（%）
@@ -246,6 +249,9 @@ def get_risk_control_config() -> dict:
         'max_order_value': get_env_int('MAX_ORDER_VALUE', 100000),
         'max_daily_trade_value': get_env_int('MAX_DAILY_TRADE_VALUE', 500000),
         'max_daily_trades': get_env_int('MAX_DAILY_TRADES', 100),
+        'max_daily_cancels': get_env_int('MAX_DAILY_CANCELS', 100),
+        'min_cancel_interval_seconds': get_env_float('MIN_CANCEL_INTERVAL_SECONDS', 0.0),
+        'max_cancel_per_order': get_env_int('MAX_CANCEL_PER_ORDER', 3),
         'max_stock_count': get_env_int('MAX_STOCK_COUNT', 20),
         'max_position_ratio': get_env_float('MAX_POSITION_RATIO', 20.0),
         'stop_loss_ratio': get_env_float('STOP_LOSS_RATIO', 5.0),

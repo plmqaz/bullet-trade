@@ -251,6 +251,8 @@ runtime/
 | `MAX_POSITION_RATIO` | `20` | 单标下单金额占总资产的最大比例。 |
 | `STOP_LOSS_RATIO` | `5` | 止损阈值，仅供 `check_stop_loss` 辅助判断。 |
 | `RISK_CHECK_ENABLED` | `false` | 开启后台风控巡检。 |
+| `QMT_SERVER_ORDER_RISK_ENABLED` | `false` | 对远程 `broker.place_order` 也执行服务端下单风控。 |
+| `QMT_SERVER_IDEMPOTENCY_TTL_SECONDS` | `300` | 远程 server 下单幂等窗口，避免链路重试重复下单。 |
 
 > 提示：默认值偏宽，真实账户请按资金量收紧；先用 `LIVE_MODE=dry_run` 验证风控配置，再切 `LIVE_MODE=live`。
 

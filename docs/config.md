@@ -54,6 +54,9 @@
 | `MAX_ORDER_VALUE` | 否 | `100000` | 单笔订单金额上限，超出直接拒单。 |
 | `MAX_DAILY_TRADE_VALUE` | 否 | `500000` | 单日累计成交金额上限，超出直接拒单。 |
 | `MAX_DAILY_TRADES` | 否 | `100` | 单日最大交易笔数，超出直接拒单。 |
+| `MAX_DAILY_CANCELS` | 否 | `100` | 单日最大撤单次数，超出直接拒绝撤单。 |
+| `MIN_CANCEL_INTERVAL_SECONDS` | 否 | `0` | 两次撤单之间的最小间隔秒数，用于拦截撤单风暴。 |
+| `MAX_CANCEL_PER_ORDER` | 否 | `3` | 单笔订单允许的最大撤单尝试次数。 |
 | `MAX_STOCK_COUNT` | 否 | `20` | 最大持仓标的数（仅买入检查）。 |
 | `MAX_POSITION_RATIO` | 否 | `20` | 单标下单金额占总资产上限，需要在风控检查时提供账户总资产才会生效。 |
 | `STOP_LOSS_RATIO` | 否 | `5` | 止损阈值，供 `check_stop_loss` 辅助判断，需策略自行下撤单。 |
@@ -68,6 +71,9 @@
 | `QMT_SERVER_TOKEN` | 是 | `secret` | 访问令牌 |
 | `QMT_SERVER_ACCOUNT_KEY` | 否 | `main` | 多账户时指定 |
 | `QMT_SERVER_SUB_ACCOUNT` | 否 | `demo@main` | 远程子账户标识，用于账户路由 |
+| `QMT_SERVER_SUB_ACCOUNTS` | 否 | `demo@main:limit=50000` | server 侧子账户映射与单笔额度限制。 |
+| `QMT_SERVER_ORDER_RISK_ENABLED` | 否 | `false` | 对 `broker.place_order` 与 `broker.cancel_order` 开启服务端风控，复用 `MAX_*` 与撤单限频参数。 |
+| `QMT_SERVER_IDEMPOTENCY_TTL_SECONDS` | 否 | `300` | `broker.place_order` 幂等缓存窗口，避免链路重试导致重复下单。 |
 | `QMT_SERVER_TLS_CERT` | 否 | `/path/to/ca.pem` | 启用 TLS 校验时的证书路径 |
 
 ## 聚宽模拟盘接入远程实盘

@@ -24,7 +24,11 @@ class RiskStats:
     daily_trade_value: float = 0.0  # 当日交易金额（元）
     daily_buy_value: float = 0.0  # 当日买入金额
     daily_sell_value: float = 0.0  # 当日卖出金额
+    daily_cancels: int = 0  # 当日撤单次数
     rejected_orders: int = 0  # 被拒绝的订单数
+    rejected_cancels: int = 0  # 被拒绝的撤单数
+    last_cancel_at: Optional[datetime] = None
+    cancel_by_order: Dict[str, int] = field(default_factory=dict)
     
     def reset(self):
         """重置统计信息"""
@@ -33,7 +37,11 @@ class RiskStats:
         self.daily_trade_value = 0.0
         self.daily_buy_value = 0.0
         self.daily_sell_value = 0.0
+        self.daily_cancels = 0
         self.rejected_orders = 0
+        self.rejected_cancels = 0
+        self.last_cancel_at = None
+        self.cancel_by_order = {}
 
 
 class RiskController:
@@ -72,6 +80,9 @@ class RiskController:
         logger.info(f"  单笔订单最大金额: ¥{self.config['max_order_value']:,}")
         logger.info(f"  单日最大交易金额: ¥{self.config['max_daily_trade_value']:,}")
         logger.info(f"  单日最大交易次数: {self.config['max_daily_trades']}")
+        logger.info(f"  单日最大撤单次数: {self.config['max_daily_cancels']}")
+        logger.info(f"  撤单最小时间间隔: {self.config['min_cancel_interval_seconds']}s")
+        logger.info(f"  单笔订单最大撤单次数: {self.config['max_cancel_per_order']}")
         logger.info(f"  最大持仓股票数: {self.config['max_stock_count']}")
         logger.info(f"  单只股票最大仓位: {self.config['max_position_ratio']}%")
         logger.info(f"  止损比例: {self.config['stop_loss_ratio']}%")
@@ -144,6 +155,49 @@ class RiskController:
         
         logger.debug(f"✅ 风控检查通过: {security or '未知证券'}, 金额: ¥{order_value:,.2f}, 操作: {action}")
         return True
+
+    def check_cancel(self, order_id: Optional[str] = None) -> bool:
+        """
+        检查撤单是否符合风控规则。
+
+        Args:
+            order_id: 订单 ID，可选。提供后会检查单笔订单的撤单次数。
+
+        Returns:
+            bool: 检查通过返回 True
+
+        Raises:
+            ValueError: 当撤单不符合风控规则时抛出
+        """
+        self._check_and_reset_daily()
+
+        if self.stats.daily_cancels >= self.config['max_daily_cancels']:
+            self.stats.rejected_cancels += 1
+            raise ValueError(
+                f"❌ 当日撤单次数超限: {self.stats.daily_cancels} >= {self.config['max_daily_cancels']}"
+            )
+
+        interval_limit = float(self.config.get('min_cancel_interval_seconds') or 0.0)
+        if interval_limit > 0 and self.stats.last_cancel_at is not None:
+            elapsed = (datetime.now() - self.stats.last_cancel_at).total_seconds()
+            if elapsed < interval_limit:
+                self.stats.rejected_cancels += 1
+                raise ValueError(
+                    f"❌ 撤单过于频繁: {elapsed:.2f}s < {interval_limit:.2f}s"
+                )
+
+        order_id = str(order_id or "").strip()
+        if order_id:
+            current = int(self.stats.cancel_by_order.get(order_id, 0))
+            max_per_order = int(self.config.get('max_cancel_per_order') or 0)
+            if max_per_order > 0 and current >= max_per_order:
+                self.stats.rejected_cancels += 1
+                raise ValueError(
+                    f"❌ 单笔订单撤单次数超限: order_id={order_id}, {current} >= {max_per_order}"
+                )
+
+        logger.debug(f"✅ 撤单风控检查通过: order_id={order_id or '未知'}")
+        return True
     
     def record_trade(self, order_value: float, action: str = 'buy'):
         """
@@ -167,6 +221,20 @@ class RiskController:
             f"📝 已记录交易: 当日第 {self.stats.daily_trades} 笔, "
             f"金额: ¥{order_value:,.2f}, "
             f"累计: ¥{self.stats.daily_trade_value:,.2f}"
+        )
+
+    def record_cancel(self, order_id: Optional[str] = None):
+        """
+        记录撤单。
+        """
+        self._check_and_reset_daily()
+        self.stats.daily_cancels += 1
+        self.stats.last_cancel_at = datetime.now()
+        order_id = str(order_id or "").strip()
+        if order_id:
+            self.stats.cancel_by_order[order_id] = int(self.stats.cancel_by_order.get(order_id, 0)) + 1
+        logger.info(
+            f"📝 已记录撤单: 当日第 {self.stats.daily_cancels} 次, order_id={order_id or '-'}"
         )
     
     def check_stop_loss(self, current_price: float, cost_price: float) -> bool:
@@ -222,9 +290,12 @@ class RiskController:
             '当日交易金额': f"¥{self.stats.daily_trade_value:,.2f}/¥{max_value:,}",
             '剩余交易次数': max_trades - self.stats.daily_trades,
             '剩余交易金额': max_value - self.stats.daily_trade_value,
+            '当日撤单次数': f"{self.stats.daily_cancels}/{self.config['max_daily_cancels']}",
+            '剩余撤单次数': self.config['max_daily_cancels'] - self.stats.daily_cancels,
             '当日买入金额': f"¥{self.stats.daily_buy_value:,.2f}",
             '当日卖出金额': f"¥{self.stats.daily_sell_value:,.2f}",
             '被拒绝订单数': self.stats.rejected_orders,
+            '被拒绝撤单数': self.stats.rejected_cancels,
         }
     
     def get_status_summary(self) -> str:
@@ -318,4 +389,3 @@ def reset_global_risk_controller():
     global _global_risk_controller
     _global_risk_controller = None
     logger.info("🔄 全局风控管理器已重置")
-

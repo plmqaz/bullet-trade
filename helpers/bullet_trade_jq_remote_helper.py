@@ -359,10 +359,11 @@ class RemoteBrokerClient:
     # ----- 基础接口 -----
     def get_account(self) -> RemoteAccount:
         payload = self._base_payload()
-        value = self._client.request("broker.account", payload).get("value") or {}
+        resp = self._client.request("broker.account", payload) or {}
+        value = resp.get("value") or resp
         return RemoteAccount(
             available_cash=float(value.get("available_cash", 0.0)),
-            total_value=float(value.get("total_value", 0.0)),
+            total_value=float(value.get("total_value", value.get("total_asset", 0.0))),
         )
 
     def get_positions(self) -> List[RemotePosition]:

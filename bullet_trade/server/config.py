@@ -58,6 +58,8 @@ class ServerConfig:
     log_file: Optional[str] = None
     log_account_snapshot: bool = False
     access_log_enabled: bool = True
+    order_risk_enabled: bool = False
+    idempotency_ttl_seconds: int = 300
 
 
 def _split_items(raw: Optional[str]) -> List[str]:
@@ -178,6 +180,8 @@ def build_server_config(args) -> ServerConfig:
     if access_log_enabled is None:
         flag = get_env_optional_bool("QMT_SERVER_ACCESS_LOG")
         access_log_enabled = True if flag is None else bool(flag)
+    order_risk_enabled = get_env_bool("QMT_SERVER_ORDER_RISK_ENABLED", False)
+    idempotency_ttl_seconds = get_env_int("QMT_SERVER_IDEMPOTENCY_TTL_SECONDS", 300)
 
     accounts_map = _parse_accounts(getattr(args, "accounts", None) or get_env("QMT_SERVER_ACCOUNTS"))
     default_account_id = get_env("QMT_ACCOUNT_ID")
@@ -229,5 +233,7 @@ def build_server_config(args) -> ServerConfig:
         log_file=log_file,
         log_account_snapshot=bool(log_account_snapshot),
         access_log_enabled=bool(access_log_enabled),
+        order_risk_enabled=bool(order_risk_enabled),
+        idempotency_ttl_seconds=max(0, int(idempotency_ttl_seconds)),
     )
     return cfg

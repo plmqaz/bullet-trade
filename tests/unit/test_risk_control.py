@@ -17,6 +17,9 @@ class TestRiskStats:
         stats.daily_trade_value = 100000
         stats.daily_buy_value = 60000
         stats.daily_sell_value = 40000
+        stats.daily_cancels = 3
+        stats.rejected_cancels = 1
+        stats.cancel_by_order = {"o1": 1}
         
         stats.reset()
         
@@ -24,7 +27,10 @@ class TestRiskStats:
         assert stats.daily_trade_value == 0.0
         assert stats.daily_buy_value == 0.0
         assert stats.daily_sell_value == 0.0
+        assert stats.daily_cancels == 0
         assert stats.current_date == date.today()
+        assert stats.rejected_cancels == 0
+        assert stats.cancel_by_order == {}
 
 
 class TestRiskController:
@@ -37,6 +43,9 @@ class TestRiskController:
             'max_order_value': 100000,
             'max_daily_trade_value': 500000,
             'max_daily_trades': 100,
+            'max_daily_cancels': 20,
+            'min_cancel_interval_seconds': 1.0,
+            'max_cancel_per_order': 2,
             'max_stock_count': 20,
             'max_position_ratio': 20.0,
             'stop_loss_ratio': 5.0,
@@ -143,6 +152,35 @@ class TestRiskController:
         assert risk_controller.stats.daily_trade_value == 100000
         assert risk_controller.stats.daily_buy_value == 70000
         assert risk_controller.stats.daily_sell_value == 30000
+
+    def test_check_cancel_success(self, risk_controller):
+        assert risk_controller.check_cancel("oid-1") is True
+
+    def test_check_cancel_exceeds_daily_limit(self, risk_controller):
+        risk_controller.stats.daily_cancels = 20
+        with pytest.raises(ValueError, match="当日撤单次数超限"):
+            risk_controller.check_cancel("oid-1")
+        assert risk_controller.stats.rejected_cancels == 1
+
+    def test_check_cancel_too_frequent(self, risk_controller, monkeypatch):
+        from datetime import datetime
+
+        risk_controller.stats.last_cancel_at = datetime.now()
+        with pytest.raises(ValueError, match="撤单过于频繁"):
+            risk_controller.check_cancel("oid-1")
+        assert risk_controller.stats.rejected_cancels == 1
+
+    def test_check_cancel_exceeds_per_order_limit(self, risk_controller):
+        risk_controller.stats.cancel_by_order["oid-1"] = 2
+        with pytest.raises(ValueError, match="单笔订单撤单次数超限"):
+            risk_controller.check_cancel("oid-1")
+        assert risk_controller.stats.rejected_cancels == 1
+
+    def test_record_cancel(self, risk_controller):
+        risk_controller.record_cancel("oid-1")
+        assert risk_controller.stats.daily_cancels == 1
+        assert risk_controller.stats.cancel_by_order["oid-1"] == 1
+        assert risk_controller.stats.last_cancel_at is not None
     
     def test_check_stop_loss_triggered(self, risk_controller):
         """测试触发止损"""
@@ -194,6 +232,7 @@ class TestRiskController:
         assert '5/100' in status['当日交易次数']
         assert status['剩余交易次数'] == 95
         assert status['被拒绝订单数'] == 2
+        assert status['当日撤单次数'] == '0/20'
     
     def test_get_status_summary(self, risk_controller):
         """测试获取状态摘要"""
@@ -304,4 +343,3 @@ class TestGlobalRiskController:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
-

@@ -146,7 +146,13 @@ class RemoteQmtBroker(BrokerBase):
         return self._connection.request("broker.orders", payload)
 
     def sync_account(self) -> Dict[str, Any]:
-        return self.get_account_info()
+        """同步账户快照，兼容 LiveEngine 需要的现金+持仓联合视图。"""
+        payload = dict(self.get_account_info() or {})
+        try:
+            payload["positions"] = self.get_positions()
+        except Exception:
+            payload.setdefault("positions", [])
+        return payload
 
     def _place_order(
         self,

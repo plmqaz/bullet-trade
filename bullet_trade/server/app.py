@@ -1,10 +1,23 @@
+"""
+作者: BruceLee
+日期: 2026-03-20
+文件说明:
+    bullet-trade 服务端核心调度入口。
+    本文件负责会话管理、broker/data action 分发、下单幂等、服务端风控、
+    tick 订阅转发等能力。
+"""
+
 from __future__ import annotations
 
 import asyncio
+import json
 import ipaddress
+import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from bullet_trade.core.globals import log
+from bullet_trade.core.risk_control import RiskController
 from bullet_trade.utils.portfolio_printer import render_account_overview
 
 from .adapters.base import AccountRouter, AdapterBundle, AccountContext, SubAccountConfig, VirtualAccountManager
@@ -13,7 +26,22 @@ from .session import ClientSession
 from .tick import TickSubscriptionManager
 
 
+@dataclass
+class _IdempotencyEntry:
+    fingerprint: str
+    result: Dict[str, Any]
+    expires_at: float
+
+
 class ServerApplication:
+    """bullet-trade 远程服务应用。
+
+    说明:
+        1. 对外暴露统一的 broker/data TCP 协议。
+        2. 支持多账户路由、子账户限额、下单幂等。
+        3. 可选启用服务端风控，拦截异常下单和频繁撤单。
+    """
+
     def __init__(self, config: ServerConfig, router: AccountRouter, adapters: AdapterBundle):
         self.config = config
         self.router = router
@@ -29,14 +57,25 @@ class ServerApplication:
         self._server: Optional[asyncio.AbstractServer] = None
         self._sessions: Set[ClientSession] = set()
         self._ip_allowlist = self._prepare_allowlist(config.allowlist)
-        self._shutdown = asyncio.Event()
-        self._started = asyncio.Event()
+        self._shutdown: Optional[asyncio.Event] = None
+        self._started: Optional[asyncio.Event] = None
+        self._idempotency_cache: Dict[Tuple[str, str, str], _IdempotencyEntry] = {}
+        self._idempotency_lock = asyncio.Lock()
+        self._risk_by_account: Dict[str, RiskController] = {}
+        self._risk_locks: Dict[str, asyncio.Lock] = {}
+        if self.config.order_risk_enabled:
+            for ctx in self.router.list_accounts():
+                account_key = ctx.config.key or "default"
+                self._risk_by_account[account_key] = RiskController()
+                self._risk_locks[account_key] = asyncio.Lock()
 
     async def start(self) -> None:
+        self._ensure_runtime_events()
         await self._start_components()
         self._server = await asyncio.start_server(self._handle_client, self.config.listen, self.config.port)
         host = self._server.sockets[0].getsockname() if self._server.sockets else (self.config.listen, self.config.port)
         log.info(f"QMT server listening on {host}")
+        assert self._started is not None
         self._started.set()
         try:
             await self._server.serve_forever()
@@ -46,6 +85,8 @@ class ServerApplication:
             await self.shutdown()
 
     async def shutdown(self) -> None:
+        self._ensure_runtime_events()
+        assert self._shutdown is not None
         if self._shutdown.is_set():
             return
         self._shutdown.set()
@@ -71,7 +112,15 @@ class ServerApplication:
         return features
 
     async def wait_started(self) -> None:
+        self._ensure_runtime_events()
+        assert self._started is not None
         await self._started.wait()
+
+    def _ensure_runtime_events(self) -> None:
+        if self._shutdown is None:
+            self._shutdown = asyncio.Event()
+        if self._started is None:
+            self._started = asyncio.Event()
 
     def register_session(self, session: ClientSession) -> None:
         if len(self._sessions) >= self.config.max_connections:
@@ -153,6 +202,10 @@ class ServerApplication:
         resolved_key, sub_cfg = self.virtual_accounts.resolve(account_key, sub_account_id)
         ctx = self.router.get(resolved_key)
         if method == "place_order":
+            cached_result = await self._lookup_idempotent_place_result(resolved_key, sub_cfg, payload)
+            if cached_result is not None:
+                return cached_result
+        if method == "place_order":
             await self._maybe_reject_when_paused(payload)
             await self._maybe_fill_price(payload)
             await self.virtual_accounts.ensure_within_limit(sub_cfg, _estimate_order_value(payload))
@@ -175,7 +228,23 @@ class ServerApplication:
         if not fn:
             raise ValueError(f"券商接口 {method} 未实现")
         args = self._build_broker_args(impl, ctx, payload)
-        result = await fn(*args)
+        if method == "place_order" and resolved_key in self._risk_by_account:
+            result = await self._place_order_with_server_risk(
+                resolved_key=resolved_key,
+                ctx=ctx,
+                payload=payload,
+                fn=fn,
+                args=args,
+            )
+        elif method == "cancel_order" and resolved_key in self._risk_by_account:
+            result = await self._cancel_order_with_server_risk(
+                resolved_key=resolved_key,
+                payload=payload,
+                fn=fn,
+                args=args,
+            )
+        else:
+            result = await fn(*args)
         paused_msg = (payload.get("meta") or {}).get("paused_warning")
         if paused_msg:
             log.warning(paused_msg + "（已透传给客户端）")
@@ -184,9 +253,146 @@ class ServerApplication:
                     result.setdefault("warning", paused_msg)
             except Exception:
                 pass
+        if method == "place_order":
+            await self._store_idempotent_place_result(resolved_key, sub_cfg, payload, result)
         if sub_cfg:
             result["sub_account_id"] = sub_cfg.sub_account_id
         return result
+
+    async def _place_order_with_server_risk(
+        self,
+        *,
+        resolved_key: str,
+        ctx: AccountContext,
+        payload: Dict,
+        fn,
+        args: Tuple,
+    ) -> Dict:
+        """在服务端风控保护下执行下单。
+
+        Args:
+            resolved_key: 解析后的真实父账户 key。
+            ctx: 当前账户上下文。
+            payload: 原始请求载荷。
+            fn: 实际下单函数。
+            args: 实际下单参数。
+
+        Returns:
+            Dict: 下单结果。
+        """
+        risk = self._risk_by_account.get(resolved_key)
+        if risk is None:
+            return await fn(*args)
+        lock = self._risk_locks.setdefault(resolved_key, asyncio.Lock())
+        async with lock:
+            order_value = _estimate_order_value(payload)
+            if order_value and order_value > 0:
+                positions = await self.adapters.broker_adapter.get_positions(ctx)
+                account_info = await self.adapters.broker_adapter.get_account_info(ctx)
+                positions_count = _count_open_positions(positions)
+                total_value = _extract_total_value(account_info)
+                side = str(payload.get("side") or "BUY").upper()
+                action = "buy" if side == "BUY" else "sell"
+                risk.check_order(
+                    order_value=order_value,
+                    current_positions_count=positions_count,
+                    security=str(payload.get("security") or ""),
+                    total_value=total_value,
+                    action=action,
+                )
+                result = await fn(*args)
+                risk.record_trade(order_value=order_value, action=action)
+                return result
+            return await fn(*args)
+
+    async def _cancel_order_with_server_risk(
+        self,
+        *,
+        resolved_key: str,
+        payload: Dict,
+        fn,
+        args: Tuple,
+    ) -> Dict:
+        """在服务端风控保护下执行撤单。
+
+        Args:
+            resolved_key: 解析后的真实父账户 key。
+            payload: 原始请求载荷。
+            fn: 实际撤单函数。
+            args: 实际撤单参数。
+
+        Returns:
+            Dict: 撤单结果。
+        """
+        risk = self._risk_by_account.get(resolved_key)
+        if risk is None:
+            return await fn(*args)
+        lock = self._risk_locks.setdefault(resolved_key, asyncio.Lock())
+        order_id = str(payload.get("order_id") or "")
+        async with lock:
+            risk.check_cancel(order_id=order_id)
+            result = await fn(*args)
+            ok = False
+            if isinstance(result, dict):
+                value = result.get("value")
+                if isinstance(value, bool):
+                    ok = value
+                elif value is None:
+                    ok = bool(result.get("success", True))
+                else:
+                    ok = bool(value)
+            else:
+                ok = bool(result)
+            if ok:
+                risk.record_cancel(order_id=order_id)
+            return result
+
+    async def _lookup_idempotent_place_result(
+        self,
+        resolved_key: str,
+        sub_cfg: Optional[SubAccountConfig],
+        payload: Dict,
+    ) -> Optional[Dict]:
+        key = str(payload.get("idempotency_key") or "").strip()
+        if not key:
+            return None
+        cache_key = (resolved_key, sub_cfg.sub_account_id if sub_cfg else "", key)
+        fingerprint = _build_place_order_fingerprint(payload)
+        now = time.monotonic()
+        async with self._idempotency_lock:
+            self._purge_expired_idempotency_entries(now)
+            entry = self._idempotency_cache.get(cache_key)
+            if entry is None:
+                return None
+            if entry.fingerprint != fingerprint:
+                raise ValueError(f"idempotency_key 冲突: {key}")
+            return dict(entry.result)
+
+    async def _store_idempotent_place_result(
+        self,
+        resolved_key: str,
+        sub_cfg: Optional[SubAccountConfig],
+        payload: Dict,
+        result: Dict,
+    ) -> None:
+        key = str(payload.get("idempotency_key") or "").strip()
+        if not key:
+            return
+        cache_key = (resolved_key, sub_cfg.sub_account_id if sub_cfg else "", key)
+        fingerprint = _build_place_order_fingerprint(payload)
+        entry = _IdempotencyEntry(
+            fingerprint=fingerprint,
+            result=dict(result or {}),
+            expires_at=time.monotonic() + max(1, int(self.config.idempotency_ttl_seconds or 300)),
+        )
+        async with self._idempotency_lock:
+            self._purge_expired_idempotency_entries(time.monotonic())
+            self._idempotency_cache[cache_key] = entry
+
+    def _purge_expired_idempotency_entries(self, now: float) -> None:
+        expired = [key for key, value in self._idempotency_cache.items() if value.expires_at <= now]
+        for key in expired:
+            self._idempotency_cache.pop(key, None)
 
     async def _maybe_fill_price(self, payload: Dict) -> None:
         """
@@ -390,7 +596,7 @@ def _estimate_order_value(payload: Dict) -> Optional[float]:
     except (TypeError, ValueError):
         amount = 0.0
     style = payload.get("style") or {}
-    price = style.get("price") or payload.get("price")
+    price = style.get("price") or style.get("protect_price") or payload.get("price")
     try:
         price = float(price) if price is not None else None
     except (TypeError, ValueError):
@@ -398,3 +604,55 @@ def _estimate_order_value(payload: Dict) -> Optional[float]:
     if amount and price:
         return amount * price
     return None
+
+
+def _build_place_order_fingerprint(payload: Dict) -> str:
+    style = payload.get("style") or {}
+    normalized = {
+        "account_key": str(payload.get("account_key") or ""),
+        "sub_account_id": str(payload.get("sub_account_id") or ""),
+        "security": str(payload.get("security") or ""),
+        "side": str(payload.get("side") or ""),
+        "amount": int(payload.get("amount") or payload.get("volume") or 0),
+        "style": {
+            "type": str(style.get("type") or "limit"),
+            "price": style.get("price"),
+            "protect_price": style.get("protect_price"),
+        },
+    }
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _count_open_positions(rows: Any) -> int:
+    if not isinstance(rows, list):
+        return 0
+    count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            amount = int(row.get("amount") or row.get("volume") or 0)
+        except (TypeError, ValueError):
+            amount = 0
+        if amount > 0:
+            count += 1
+    return count
+
+
+def _extract_total_value(payload: Any) -> float:
+    if isinstance(payload, dict) and payload.get("dtype") == "dict" and "value" in payload:
+        payload = payload.get("value") or {}
+    if not isinstance(payload, dict):
+        return 0.0
+    candidates = (
+        payload.get("total_value"),
+        payload.get("total_asset"),
+        payload.get("portfolio_value"),
+    )
+    for value in candidates:
+        try:
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
