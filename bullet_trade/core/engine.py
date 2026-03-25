@@ -224,6 +224,8 @@ class BacktestEngine:
             order_target_value,
             cancel_order,
             cancel_all_orders,
+            MarketOrderStyle,
+            LimitOrderStyle,
         )
         from .scheduler import run_daily, run_weekly, run_monthly, unschedule_all
         from ..data import api as wrapped_api
@@ -280,6 +282,8 @@ class BacktestEngine:
         module.order_value = order_value
         module.order_target = order_target
         module.order_target_value = order_target_value
+        module.MarketOrderStyle = MarketOrderStyle
+        module.LimitOrderStyle = LimitOrderStyle
         module.get_open_orders = _get_open_orders
         module.get_orders = _get_orders
         module.get_trades = _get_trades
