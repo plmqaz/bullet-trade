@@ -16,7 +16,8 @@ from bullet_trade.broker.base import BrokerBase
 from bullet_trade.core import pricing
 from bullet_trade.core.async_scheduler import AsyncScheduler
 from bullet_trade.core.event_bus import EventBus
-from bullet_trade.core.live_engine import LiveEngine, LivePortfolioProxy, TradingCalendarGuard
+from bullet_trade.core.live_engine import LiveConfig, LiveEngine, LivePortfolioProxy, TradingCalendarGuard
+from bullet_trade.core.live_lock import LiveLockBusyError
 from bullet_trade.core.live_runtime import (
     load_strategy_metadata,
     load_subscription_state,
@@ -125,6 +126,22 @@ class DummyBroker(BrokerBase):
         return self._tick_snapshots.get(symbol)
 
 
+class AccountBroker(DummyBroker):
+    def __init__(
+        self,
+        *,
+        account_id: str = "dummy",
+        account_key: str = "",
+        sub_account_id: str = "",
+    ):
+        super().__init__()
+        self.account_id = account_id
+        if account_key:
+            self.account_key = account_key
+        if sub_account_id:
+            self.sub_account_id = sub_account_id
+
+
 def _write_strategy(tmp_path: Path) -> Path:
     src = """
 from bullet_trade.core.scheduler import run_daily
@@ -164,6 +181,128 @@ def every_minute(context):
     path = tmp_path / "strategy_hooks.py"
     path.write_text(src, encoding="utf-8")
     return path
+
+
+def test_live_config_defaults_risk_check_to_false(monkeypatch):
+    monkeypatch.delenv("RISK_CHECK_ENABLED", raising=False)
+
+    cfg = LiveConfig.load()
+
+    assert cfg.risk_check_enabled is False
+
+
+def test_live_config_parses_string_bool_overrides(monkeypatch):
+    monkeypatch.delenv("RISK_CHECK_ENABLED", raising=False)
+    monkeypatch.delenv("ACCOUNT_SYNC_ENABLED", raising=False)
+
+    cfg = LiveConfig.load({
+        "risk_check_enabled": "false",
+        "account_sync_enabled": "false",
+    })
+
+    assert cfg.risk_check_enabled is False
+    assert cfg.account_sync_enabled is False
+
+
+def _build_lock_test_engine(
+    tmp_path: Path,
+    strategy: Path,
+    *,
+    runtime_name: str,
+    account_id: str = "dummy",
+    account_key: str = "",
+    sub_account_id: str = "",
+) -> LiveEngine:
+    cfg = {
+        "runtime_dir": str(tmp_path / runtime_name),
+        "g_autosave_enabled": False,
+        "account_sync_enabled": False,
+        "order_sync_enabled": False,
+        "tick_sync_enabled": False,
+        "risk_check_enabled": False,
+        "broker_heartbeat_interval": 0,
+    }
+    return LiveEngine(
+        strategy_file=strategy,
+        broker_factory=lambda: AccountBroker(
+            account_id=account_id,
+            account_key=account_key,
+            sub_account_id=sub_account_id,
+        ),
+        live_config=cfg,
+    )
+
+
+def test_live_engine_rejects_duplicate_instance_same_account(monkeypatch, tmp_path):
+    monkeypatch.setenv("BULLET_TRADE_HOME", str(tmp_path))
+    strategy = _write_strategy(tmp_path)
+    engine1 = _build_lock_test_engine(tmp_path, strategy, runtime_name="runtime-a", account_id="acct-main")
+    engine2 = _build_lock_test_engine(tmp_path, strategy, runtime_name="runtime-b", account_id="acct-main")
+
+    engine1._acquire_live_locks()
+    try:
+        with pytest.raises(LiveLockBusyError, match="重复 live 实例"):
+            engine2._acquire_live_locks()
+    finally:
+        engine2._release_live_locks()
+        engine1._release_live_locks()
+
+
+def test_live_engine_rejects_shared_runtime_dir_across_accounts(monkeypatch, tmp_path):
+    monkeypatch.setenv("BULLET_TRADE_HOME", str(tmp_path))
+    strategy = _write_strategy(tmp_path)
+    engine1 = _build_lock_test_engine(
+        tmp_path,
+        strategy,
+        runtime_name="shared-runtime",
+        account_key="parent-a",
+        sub_account_id="sub-a",
+    )
+    engine2 = _build_lock_test_engine(
+        tmp_path,
+        strategy,
+        runtime_name="shared-runtime",
+        account_key="parent-a",
+        sub_account_id="sub-b",
+    )
+
+    engine1._acquire_live_locks()
+    try:
+        with pytest.raises(LiveLockBusyError, match="RUNTIME_DIR 已被其他 live 实例占用"):
+            engine2._acquire_live_locks()
+    finally:
+        engine2._release_live_locks()
+        engine1._release_live_locks()
+
+
+def test_live_engine_allows_parallel_instances_for_different_accounts(monkeypatch, tmp_path):
+    monkeypatch.setenv("BULLET_TRADE_HOME", str(tmp_path))
+    strategy = _write_strategy(tmp_path)
+    engine1 = _build_lock_test_engine(
+        tmp_path,
+        strategy,
+        runtime_name="runtime-sub-a",
+        account_key="parent-a",
+        sub_account_id="sub-a",
+    )
+    engine2 = _build_lock_test_engine(
+        tmp_path,
+        strategy,
+        runtime_name="runtime-sub-b",
+        account_key="parent-a",
+        sub_account_id="sub-b",
+    )
+
+    try:
+        engine1._acquire_live_locks()
+        engine2._acquire_live_locks()
+        assert engine1._runtime_lock is not None
+        assert engine1._instance_lock is not None
+        assert engine2._runtime_lock is not None
+        assert engine2._instance_lock is not None
+    finally:
+        engine2._release_live_locks()
+        engine1._release_live_locks()
 
 
 @pytest.mark.asyncio
@@ -760,6 +899,55 @@ async def test_handle_tick_hook_receives_context(tmp_path):
     assert payload["context"] is engine.context
     assert payload["tick"]["sid"] == "000001.XSHE"
     await engine._shutdown()
+
+
+@pytest.mark.asyncio
+async def test_process_orders_skips_risk_checks_when_disabled(monkeypatch, tmp_path):
+    strategy = _write_strategy(tmp_path)
+    cfg = {
+        "runtime_dir": str(tmp_path / "runtime"),
+        "g_autosave_enabled": False,
+        "account_sync_enabled": False,
+        "order_sync_enabled": False,
+        "tick_sync_enabled": False,
+        "risk_check_enabled": False,
+        "broker_heartbeat_interval": 0,
+    }
+    engine = LiveEngine(
+        strategy_file=strategy,
+        broker_factory=DummyBroker,
+        live_config=cfg,
+    )
+    loop = asyncio.get_running_loop()
+    engine._loop = loop
+    engine._order_lock = asyncio.Lock()
+    engine._stop_event = asyncio.Event()
+    engine.event_bus = EventBus(loop)
+    engine.async_scheduler = AsyncScheduler()
+    engine.broker = DummyBroker()
+    engine.context.portfolio.available_cash = 1_000
+    engine.context.portfolio.total_value = 1_000
+    assert engine._risk is None
+
+    class Snap:
+        paused = False
+        last_price = 10.0
+        high_limit = 10.5
+        low_limit = 9.5
+
+    monkeypatch.setattr("bullet_trade.core.live_engine.get_current_data", lambda: {"159915.XSHE": Snap()})
+
+    clear_order_queue()
+    set_current_engine(engine)
+    try:
+        order("159915.XSHE", 100)
+        await engine._process_orders(engine.context.current_dt)
+    finally:
+        set_current_engine(None)
+
+    assert len(engine.broker.orders) == 1
+    security, amount, _, side, market = engine.broker.orders[0]
+    assert (security, amount, side, market) == ("159915.XSHE", 100, "buy", True)
 
 
 @pytest.mark.asyncio

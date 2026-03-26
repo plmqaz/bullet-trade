@@ -6,7 +6,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 def load_env(env_file: Optional[str] = None, verbose: bool = False, override: bool = False) -> None:
@@ -62,6 +62,19 @@ def get_env(key: str, default: Optional[str] = None) -> Optional[str]:
     return os.environ.get(key, default)
 
 
+def parse_bool(value: Any, default: bool = False) -> bool:
+    """
+    将字符串、数字或布尔值解析为布尔类型。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ('true', '1', 'yes', 'on')
+    return bool(value)
+
+
 def get_env_bool(key: str, default: bool = False) -> bool:
     """
     获取布尔类型环境变量
@@ -74,9 +87,7 @@ def get_env_bool(key: str, default: bool = False) -> bool:
         布尔值
     """
     value = get_env(key)
-    if value is None:
-        return default
-    return value.lower() in ('true', '1', 'yes', 'on')
+    return parse_bool(value, default=default)
 
 
 def get_env_optional_bool(key: str) -> Optional[bool]:
@@ -92,7 +103,7 @@ def get_env_optional_bool(key: str) -> Optional[bool]:
     value = get_env(key)
     if value is None:
         return None
-    return value.lower() in ('true', '1', 'yes', 'on')
+    return parse_bool(value)
 
 
 def get_env_int(key: str, default: int = 0) -> int:
@@ -283,7 +294,7 @@ def get_live_trade_config() -> dict:
 
     - tick_sync_interval / enabled: Tick 轮询间隔及开关（默认 2 / True）
 
-    - risk_check_interval / enabled: 风控后台任务（默认 300 / True）
+    - risk_check_interval / enabled: 风控后台任务（默认 300 / False）
 
     - broker_heartbeat_interval: 券商心跳检测间隔（默认 30）
 

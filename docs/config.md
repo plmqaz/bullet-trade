@@ -14,7 +14,7 @@
 | `LOG_DIR` | 否 | `logs` | 日志目录 |
 | `LOG_LEVEL` | 否 | `INFO` | 控制台日志级别（`DEBUG`/`INFO`/`WARNING`/`ERROR`） |
 | `LOG_FILE_LEVEL` | 否 | 跟随 `LOG_LEVEL` | 文件日志级别，未设置则与 `LOG_LEVEL` 相同 |
-| `RUNTIME_DIR` | 否 | `runtime` | 运行态/持久化目录（含 g.pkl、live_state.json） |
+| `RUNTIME_DIR` | 否 | `runtime` | 运行态/持久化目录（含 g.pkl、live_state.json）；同一时刻只能被一个 live 实例占用 |
 
 ## 回测
 | 变量 | 必填 | 示例/默认 | 作用 |

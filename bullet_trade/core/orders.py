@@ -90,6 +90,33 @@ def _register_order_snapshot(order_obj: Order) -> None:
             pass
 
 
+def _format_order_price(value: Optional[float]) -> str:
+    if value is None:
+        return "未指定"
+    return f"{float(value):.4f}"
+
+
+def _describe_order_style(style: object) -> str:
+    if isinstance(style, LimitOrderStyle):
+        return f"LimitOrderStyle(price={_format_order_price(style.price)})"
+    if isinstance(style, MarketOrderStyle):
+        if style.limit_price is not None:
+            return f"MarketOrderStyle(limit_price={_format_order_price(style.limit_price)})"
+        return "MarketOrderStyle(market)"
+    return style.__class__.__name__
+
+
+def _resolve_log_price(
+    price: Optional[float],
+    style: Optional[Union[OrderStyle, MarketOrderStyle, LimitOrderStyle]],
+) -> Optional[float]:
+    if isinstance(style, LimitOrderStyle):
+        return float(style.price)
+    if isinstance(style, MarketOrderStyle) and style.limit_price is not None:
+        return float(style.limit_price)
+    return float(price) if price is not None else None
+
+
 def order(
     security: str,
     amount: int,
@@ -139,7 +166,10 @@ def order(
     
     _order_queue.append(order_obj)
     _register_order_snapshot(order_obj)
-    log.debug(f"创建订单: {security}, 数量: {amount}, 价格: {price}")
+    log.debug(
+        f"创建订单: {security}, 数量: {amount}, 风格: {_describe_order_style(resolved_style)}, "
+        f"价格: {_format_order_price(_resolve_log_price(price, resolved_style))}"
+    )
     _trigger_order_processing(wait_timeout)
     
     return order_obj
@@ -262,7 +292,10 @@ def order_value(
     
     _order_queue.append(order_obj)
     _register_order_snapshot(order_obj)
-    log.debug(f"创建订单（按价值）: {security}, 价值: {value}")
+    log.debug(
+        f"创建订单（按价值）: {security}, 价值: {value}, 风格: {_describe_order_style(resolved_style)}, "
+        f"价格: {_format_order_price(_resolve_log_price(price, resolved_style))}"
+    )
     _trigger_order_processing(wait_timeout)
     
     return order_obj
@@ -306,7 +339,10 @@ def order_target(
 
     _order_queue.append(order_obj)
     _register_order_snapshot(order_obj)
-    log.debug(f"创建订单（目标股数）: {security}, 目标数量: {amount}")
+    log.debug(
+        f"创建订单（目标股数）: {security}, 目标数量: {amount}, 风格: {_describe_order_style(resolved_style)}, "
+        f"价格: {_format_order_price(_resolve_log_price(price, resolved_style))}"
+    )
     _trigger_order_processing(wait_timeout)
 
     return order_obj
@@ -350,7 +386,10 @@ def order_target_value(
 
     _order_queue.append(order_obj)
     _register_order_snapshot(order_obj)
-    log.debug(f"创建订单（目标价值）: {security}, 目标价值 {value}")
+    log.debug(
+        f"创建订单（目标价值）: {security}, 目标价值 {value}, 风格: {_describe_order_style(resolved_style)}, "
+        f"价格: {_format_order_price(_resolve_log_price(price, resolved_style))}"
+    )
     _trigger_order_processing(wait_timeout)
 
     return order_obj

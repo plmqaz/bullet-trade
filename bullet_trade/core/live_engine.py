@@ -10,6 +10,7 @@ LiveEngine
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ from ..data.api import get_current_data, set_current_context, get_security_info,
 from ..utils.env_loader import (
     get_broker_config,
     get_live_trade_config,
+    parse_bool,
 )
 from ..broker import BrokerBase, QmtBroker, RemoteQmtBroker
 from ..broker.simulator import SimulatorBroker
@@ -83,6 +85,11 @@ from .live_runtime import (
     persist_strategy_metadata,
 )
 from .orders import get_order_queue, clear_order_queue, MarketOrderStyle, LimitOrderStyle
+from .live_lock import (
+    ManagedLiveLock,
+    build_lock_metadata,
+    get_live_lock_dir,
+)
 from .risk_control import get_global_risk_controller
 from .engine import PRE_MARKET_OFFSET, BacktestEngine
 from . import pricing
@@ -126,21 +133,21 @@ class LiveConfig:
             strategy_name=raw.get('strategy_name'),
             scheduler_market_periods=raw.get('scheduler_market_periods'),
             account_sync_interval=int(raw.get('account_sync_interval', 60)),
-            account_sync_enabled=bool(raw.get('account_sync_enabled', True)),
+            account_sync_enabled=parse_bool(raw.get('account_sync_enabled'), default=True),
             order_sync_interval=int(raw.get('order_sync_interval', 10)),
-            order_sync_enabled=bool(raw.get('order_sync_enabled', True)),
+            order_sync_enabled=parse_bool(raw.get('order_sync_enabled'), default=True),
             g_autosave_interval=int(raw.get('g_autosave_interval', 60)),
-            g_autosave_enabled=bool(raw.get('g_autosave_enabled', True)),
+            g_autosave_enabled=parse_bool(raw.get('g_autosave_enabled'), default=True),
             tick_subscription_limit=int(raw.get('tick_subscription_limit', 100)),
             tick_sync_interval=int(raw.get('tick_sync_interval', 2)),
-            tick_sync_enabled=bool(raw.get('tick_sync_enabled', True)),
+            tick_sync_enabled=parse_bool(raw.get('tick_sync_enabled'), default=True),
             risk_check_interval=int(raw.get('risk_check_interval', 300)),
-            risk_check_enabled=bool(raw.get('risk_check_enabled', True)),
+            risk_check_enabled=parse_bool(raw.get('risk_check_enabled'), default=False),
             broker_heartbeat_interval=int(raw.get('broker_heartbeat_interval', 30)),
             runtime_dir=str(raw.get('runtime_dir', './runtime')),
             buy_price_percent=float(raw.get('market_buy_price_percent', 0.015)),
             sell_price_percent=float(raw.get('market_sell_price_percent', -0.015)),
-            calendar_skip_weekend=bool(raw.get('calendar_skip_weekend', True)),
+            calendar_skip_weekend=parse_bool(raw.get('calendar_skip_weekend'), default=True),
             calendar_retry_minutes=int(raw.get('calendar_retry_minutes', 1)),
             portfolio_refresh_throttle_ms=int(raw.get('portfolio_refresh_throttle_ms', 200)),
         )
@@ -221,7 +228,7 @@ class LiveEngine:
         self._latest_ticks: Dict[str, Dict[str, Any]] = {}
         self._security_name_cache: Dict[str, str] = {}
 
-        self._risk = get_global_risk_controller()
+        self._risk = get_global_risk_controller() if self.config.risk_check_enabled else None
         self._order_lock: Optional[asyncio.Lock] = None
         self._last_account_refresh: Optional[datetime] = None
         self._orders: Dict[str, Order] = {}
@@ -231,6 +238,8 @@ class LiveEngine:
         self._initial_nav_synced: bool = False
         self._provider_tick_callback_bound: bool = False
         self._tick_subscription_updated: bool = False
+        self._runtime_lock: Optional[ManagedLiveLock] = None
+        self._instance_lock: Optional[ManagedLiveLock] = None
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -269,13 +278,15 @@ class LiveEngine:
         self.event_bus = EventBus(self._loop)
         self.async_scheduler = AsyncScheduler()
 
-        await self._bootstrap()
-
-        await self.event_bus.emit(SystemStartEvent())
+        bootstrapped = False
         try:
+            await self._bootstrap()
+            bootstrapped = True
+            await self.event_bus.emit(SystemStartEvent())
             await self._run_loop()
         finally:
-            await self.event_bus.emit(SystemStopEvent())
+            if bootstrapped:
+                await self.event_bus.emit(SystemStopEvent())
             await self._shutdown()
 
     # ------------------------------------------------------------------
@@ -302,6 +313,9 @@ class LiveEngine:
         else:
             self.handle_tick_func = None
             self.after_code_changed_func = None
+
+        self._ensure_broker_created()
+        self._acquire_live_locks()
 
         init_live_runtime(self.config.runtime_dir)
         if self.config.g_autosave_enabled:
@@ -408,7 +422,12 @@ class LiveEngine:
                 log.warning(f"券商清理失败: {exc}")
 
         if self.config.g_autosave_enabled:
-            stop_g_autosave()
+            try:
+                stop_g_autosave()
+            finally:
+                self._release_live_locks()
+        else:
+            self._release_live_locks()
 
     # ------------------------------------------------------------------
     # 主循环
@@ -1560,6 +1579,8 @@ class LiveEngine:
             log.debug(f"订单同步失败: {exc}")
 
     async def _risk_step(self) -> None:
+        if not self._risk:
+            return
         try:
             summary = self._risk.get_status_summary()
             log.info(summary)
@@ -1580,7 +1601,8 @@ class LiveEngine:
     # ------------------------------------------------------------------
 
     def _init_broker(self) -> None:
-        self.broker = self._create_broker()
+        self._ensure_broker_created()
+        assert self.broker is not None
         self.broker.connect()
         summary = self._safe_account_info()
         positions = summary.get('positions') or []
@@ -1596,6 +1618,110 @@ class LiveEngine:
         self._log_account_positions(summary)
         if summary:
             self._apply_account_snapshot(summary)
+
+    def _ensure_broker_created(self) -> None:
+        if self.broker is None:
+            self.broker = self._create_broker()
+
+    def _acquire_live_locks(self) -> None:
+        if self._runtime_lock and self._instance_lock:
+            return
+        self._ensure_broker_created()
+        assert self.broker is not None
+
+        metadata = self._build_live_lock_metadata()
+        runtime_dir = Path(self.config.runtime_dir).expanduser().resolve()
+        runtime_lock = ManagedLiveLock(
+            lock_path=runtime_dir / ".live.lock",
+            metadata_path=runtime_dir / ".live.lock.json",
+            metadata=dict(metadata, lock_kind="runtime_dir"),
+            busy_message=f"实盘启动被拒绝：RUNTIME_DIR 已被其他 live 实例占用 ({runtime_dir})",
+        )
+        runtime_lock.acquire()
+        try:
+            instance_key = self._build_instance_lock_key(metadata)
+            instance_dir = get_live_lock_dir()
+            instance_lock = ManagedLiveLock(
+                lock_path=instance_dir / f"{instance_key}.lock",
+                metadata_path=instance_dir / f"{instance_key}.json",
+                metadata=dict(metadata, lock_kind="logical_instance", instance_key=instance_key),
+                busy_message="实盘启动被拒绝：检测到同机同策略同账号的重复 live 实例",
+            )
+            instance_lock.acquire()
+        except Exception:
+            runtime_lock.release()
+            raise
+
+        self._runtime_lock = runtime_lock
+        self._instance_lock = instance_lock
+
+    def _release_live_locks(self) -> None:
+        if self._instance_lock:
+            self._instance_lock.release()
+            self._instance_lock = None
+        if self._runtime_lock:
+            self._runtime_lock.release()
+            self._runtime_lock = None
+
+    def _build_live_lock_metadata(self) -> Dict[str, Any]:
+        assert self.broker is not None
+        broker = self.broker
+        broker_type = broker.__class__.__name__
+        account_identity, account_parts = self._resolve_account_identity(broker)
+        return build_lock_metadata(
+            strategy_name=self.config.strategy_name or self.strategy_path.stem,
+            strategy_path=str(self.strategy_path.resolve()),
+            runtime_dir=str(Path(self.config.runtime_dir).expanduser().resolve()),
+            broker_type=broker_type,
+            broker_name=self.broker_name or broker_type,
+            account_identity=account_identity,
+            account_id=account_parts.get("account_id"),
+            account_key=account_parts.get("account_key"),
+            sub_account_id=account_parts.get("sub_account_id"),
+        )
+
+    def _resolve_account_identity(self, broker: BrokerBase) -> Tuple[str, Dict[str, str]]:
+        def _text(value: Any) -> str:
+            if value is None:
+                return ""
+            return str(value).strip()
+
+        raw_parts = {
+            "account_id": _text(getattr(broker, "account_id", "")),
+            "account_key": _text(getattr(broker, "account_key", "")),
+            "sub_account_id": _text(getattr(broker, "sub_account_id", "")),
+        }
+        cfg = getattr(broker, "config", None)
+        if cfg:
+            raw_parts["account_key"] = raw_parts["account_key"] or _text(getattr(cfg, "account_key", None))
+            raw_parts["sub_account_id"] = raw_parts["sub_account_id"] or _text(
+                getattr(cfg, "sub_account_id", None)
+            )
+            raw_parts["account_id"] = raw_parts["account_id"] or _text(getattr(cfg, "account_id", None))
+
+        parts = {key: value for key, value in raw_parts.items() if value}
+        ordered: List[str] = []
+        if parts.get("account_key"):
+            ordered.append(f"account_key={parts['account_key']}")
+        if parts.get("sub_account_id"):
+            ordered.append(f"sub_account_id={parts['sub_account_id']}")
+        if parts.get("account_id"):
+            ordered.append(f"account_id={parts['account_id']}")
+        if not ordered:
+            ordered.append(f"account_id=unknown:{broker.__class__.__name__}")
+        return "|".join(ordered), parts
+
+    def _build_instance_lock_key(self, metadata: Dict[str, Any]) -> str:
+        key = "|".join(
+            [
+                metadata.get("host", ""),
+                os.path.normcase(str(self.strategy_path.resolve())),
+                metadata.get("broker_type", ""),
+                metadata.get("account_identity", ""),
+            ]
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return f"live-instance-{digest}"
 
     @staticmethod
     def _task_meta_key(
@@ -2490,4 +2616,3 @@ class TradingCalendarGuard:
         if not self._next_check:
             return 1.0
         return max(0.1, (self._next_check - now).total_seconds())
-

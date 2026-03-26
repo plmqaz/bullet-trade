@@ -165,6 +165,13 @@ bullet-trade live [-h] strategy_file --broker {qmt,qmt-remote,simulator}
 | `--log-dir` | | 日志目录（覆盖 .env 中的 LOG_DIR） |
 | `--runtime-dir` | | 运行态目录（覆盖 .env 中的 RUNTIME_DIR） |
 
+### 实例互斥规则
+
+- 同一台机器上，“同策略 + 同账号”的 live 实例不能重复启动，即使 `RUNTIME_DIR` 不同也会被拒绝。
+- 任意两个 live 实例不能共享同一个 `RUNTIME_DIR`，即使账号不同也会被拒绝。
+- 想让同一策略在不同账号上并行运行，必须同时为不同账号配置不同的 `RUNTIME_DIR`。
+- 本次约束不会修改现有 `RUNTIME_DIR`、`g.pkl`、`live_state.json` 的路径或文件名，历史 runtime 可直接沿用。
+
 ### 实盘效果与日志
 
 QMT 本机持仓/下单：
@@ -264,6 +271,12 @@ runtime/
 ### 策略重启后状态丢失
 
 检查 `RUNTIME_DIR` 配置是否正确，确保指向持久化目录。
+
+### live 启动时提示实例已占用
+
+1. 若提示“同机同策略同账号的重复 live 实例”，先检查是否已有同一账号的策略进程仍在运行。
+2. 若提示 `RUNTIME_DIR` 已占用，说明有另一个 live 实例正在使用同一运行态目录。
+3. 多账号并行时，请为每个账号配置独立的 `RUNTIME_DIR`，不要共用同一个 runtime 目录。
 
 ### 定时任务没有触发
 
