@@ -628,6 +628,7 @@ class LiveEngine:
                 return
             open_position_symbols = self._get_open_position_symbols()
             pending_new_positions: Set[str] = set()
+            submitted_buys: Dict[str, Dict[str, Any]] = {}
             for order in orders:
                 self._register_order(order)
                 plan = self._build_order_plan(order, current_data)
@@ -720,16 +721,48 @@ class LiveEngine:
                             log.debug(f"记录风控交易失败: {record_exc}")
                         if plan.is_buy and plan.security not in open_position_symbols:
                             pending_new_positions.add(plan.security)
+                    if plan.is_buy and order_id:
+                        meta = submitted_buys.setdefault(
+                            plan.security,
+                            {
+                                "pre_amount": 0,
+                                "pre_avg_cost": 0.0,
+                                "broker_order_ids": [],
+                            },
+                        )
+                        if not meta["broker_order_ids"]:
+                            pre_amount, pre_avg_cost = self._current_position_state(plan.security)
+                            meta["pre_amount"] = pre_amount
+                            meta["pre_avg_cost"] = pre_avg_cost
+                        meta["broker_order_ids"].append(str(order_id))
                 except Exception as exc:
                     log.error(f"委托失败 {order.security}: {exc}")
                     try:
                         order.status = OrderStatus.rejected
                     except Exception:
                         pass
+            order_snapshots: List[Dict[str, Any]] = []
+            trade_snapshots: List[Dict[str, Any]] = []
+            try:
+                order_snapshots = self._sync_orders_from_broker()
+                if order_snapshots:
+                    self._apply_order_snapshots(order_snapshots)
+            except Exception as exc:
+                log.debug(f"订单执行后同步订单快照失败: {exc}")
+            try:
+                trade_snapshots = self._sync_trades_from_broker()
+                if trade_snapshots:
+                    self._apply_trade_snapshots(trade_snapshots)
+            except Exception as exc:
+                log.debug(f"订单执行后同步成交快照失败: {exc}")
             try:
                 self.refresh_account_snapshot(force=True)
             except Exception as exc:
                 log.debug(f"订单执行后刷新账户快照失败: {exc}")
+            try:
+                self._reconcile_submitted_buy_costs(submitted_buys, order_snapshots, trade_snapshots)
+            except Exception as exc:
+                log.debug(f"订单执行后修正持仓成本失败: {exc}")
 
     def _register_order(self, order: Order) -> None:
         if not order:
@@ -845,6 +878,127 @@ class LiveEngine:
                 return []
         return []
 
+    def _snapshot_filled_amount(self, snapshot: Dict[str, Any]) -> int:
+        filled = snapshot.get("filled")
+        if filled is None:
+            filled = snapshot.get("traded_volume") or snapshot.get("filled_amount")
+        try:
+            return int(filled or 0)
+        except Exception:
+            return 0
+
+    def _resolve_snapshot_fill_price(self, snapshot: Dict[str, Any]) -> Optional[float]:
+        filled = self._snapshot_filled_amount(snapshot)
+        candidates: List[Any] = [
+            snapshot.get("traded_price"),
+            snapshot.get("avg_price"),
+            snapshot.get("avg_cost"),
+        ]
+        if filled > 0:
+            candidates.append(snapshot.get("price"))
+        for candidate in candidates:
+            price = self._maybe_float(candidate)
+            if price is not None and price > 0:
+                return price
+        return None
+
+    def _portfolio_target(self) -> Portfolio:
+        if isinstance(self.context.portfolio, LivePortfolioProxy):
+            return self.portfolio_proxy.backing
+        return self.context.portfolio
+
+    def _current_position_state(self, security: str) -> Tuple[int, float]:
+        position = self._portfolio_target().positions.get(security)
+        if position is None:
+            return 0, 0.0
+        return int(position.total_amount or 0), float(position.avg_cost or 0.0)
+
+    def _reconcile_submitted_buy_costs(
+        self,
+        submitted_buys: Dict[str, Dict[str, Any]],
+        order_snapshots: List[Dict[str, Any]],
+        trade_snapshots: List[Dict[str, Any]],
+    ) -> None:
+        if not submitted_buys:
+            return
+
+        order_by_id: Dict[str, Dict[str, Any]] = {}
+        for snap in order_snapshots:
+            if not isinstance(snap, dict):
+                continue
+            broker_order_id = snap.get("order_id") or snap.get("entrust_id")
+            if broker_order_id is None:
+                continue
+            order_by_id[str(broker_order_id)] = snap
+
+        trade_fill_by_id: Dict[str, Tuple[int, float]] = {}
+        for snap in trade_snapshots:
+            if not isinstance(snap, dict):
+                continue
+            broker_order_id = snap.get("order_id") or snap.get("entrust_id")
+            if broker_order_id is None:
+                continue
+            amount = snap.get("amount") or snap.get("volume") or snap.get("trade_volume") or 0
+            price = self._maybe_float(snap.get("price") or snap.get("trade_price"))
+            try:
+                qty = int(amount or 0)
+            except Exception:
+                qty = 0
+            if qty <= 0 or price is None or price <= 0:
+                continue
+            key = str(broker_order_id)
+            prev_qty, prev_avg = trade_fill_by_id.get(key, (0, 0.0))
+            total_qty = prev_qty + qty
+            total_value = prev_avg * prev_qty + price * qty
+            trade_fill_by_id[key] = (total_qty, total_value / total_qty)
+
+        target = self._portfolio_target()
+        for security, meta in submitted_buys.items():
+            broker_order_ids = [str(item) for item in meta.get("broker_order_ids") or [] if item]
+            if not broker_order_ids:
+                continue
+
+            filled_qty = 0
+            filled_value = 0.0
+            for broker_order_id in broker_order_ids:
+                trade_fill = trade_fill_by_id.get(broker_order_id)
+                if trade_fill is not None:
+                    qty, avg_price = trade_fill
+                else:
+                    order_snapshot = order_by_id.get(broker_order_id)
+                    qty = self._snapshot_filled_amount(order_snapshot or {})
+                    avg_price = self._resolve_snapshot_fill_price(order_snapshot or {}) or 0.0
+                if qty <= 0 or avg_price <= 0:
+                    continue
+                filled_qty += qty
+                filled_value += avg_price * qty
+
+            if filled_qty <= 0 or filled_value <= 0:
+                continue
+
+            position = target.positions.get(security)
+            if position is None or int(position.total_amount or 0) <= 0:
+                continue
+
+            pre_amount = int(meta.get("pre_amount") or 0)
+            pre_avg_cost = float(meta.get("pre_avg_cost") or 0.0)
+            expected_amount = pre_amount + filled_qty
+            if int(position.total_amount or 0) != expected_amount:
+                continue
+
+            fill_avg_cost = filled_value / filled_qty
+            if pre_amount > 0 and pre_avg_cost > 0:
+                resolved_cost = ((pre_avg_cost * pre_amount) + filled_value) / expected_amount
+            else:
+                resolved_cost = fill_avg_cost
+
+            previous_cost = float(position.avg_cost or 0.0)
+            if abs(previous_cost - resolved_cost) <= 1e-9:
+                continue
+            position.avg_cost = resolved_cost
+            position.acc_avg_cost = resolved_cost
+            log.debug(f"成交均价修正持仓成本: {security} avg_cost {previous_cost:.4f} -> {resolved_cost:.4f}")
+
     def _apply_order_snapshots(self, snapshots: List[Dict[str, Any]]) -> None:
         if not snapshots:
             return
@@ -866,9 +1020,9 @@ class LiveEngine:
                     order.status = self._coerce_status(status)
                 except Exception:
                     pass
-            price = snap.get("price")
+            price = self._resolve_snapshot_fill_price(snap)
             if price is None:
-                price = snap.get("traded_price") or snap.get("avg_price")
+                price = self._maybe_float(snap.get("price"))
             if price is not None:
                 try:
                     order.price = float(price or 0)
@@ -882,9 +1036,7 @@ class LiveEngine:
                     order.amount = int(amount or 0)
                 except Exception:
                     pass
-            filled = snap.get("filled")
-            if filled is None:
-                filled = snap.get("traded_volume") or snap.get("filled_amount")
+            filled = self._snapshot_filled_amount(snap)
             if filled is not None:
                 try:
                     order.filled = int(filled or 0)
@@ -998,12 +1150,10 @@ class LiveEngine:
         amount = snapshot.get("amount")
         if amount is None:
             amount = snapshot.get("order_volume") or snapshot.get("volume")
-        filled = snapshot.get("filled")
-        if filled is None:
-            filled = snapshot.get("traded_volume") or snapshot.get("filled_amount")
-        price = snapshot.get("price")
+        filled = self._snapshot_filled_amount(snapshot)
+        price = self._resolve_snapshot_fill_price(snapshot)
         if price is None:
-            price = snapshot.get("traded_price") or snapshot.get("avg_price")
+            price = self._maybe_float(snapshot.get("price"))
         status = snapshot.get("status") or snapshot.get("state") or OrderStatus.open.value
         is_buy = self._snapshot_is_buy(snapshot)
 
@@ -2360,6 +2510,13 @@ class LiveEngine:
             lines.append(_format_row(row))
             lines.append(_border("-"))
         return "\n".join(lines)
+
+    @staticmethod
+    def _maybe_float(value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _format_currency(value: float) -> str:

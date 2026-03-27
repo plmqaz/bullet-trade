@@ -26,7 +26,7 @@ from bullet_trade.core.live_runtime import (
 )
 from bullet_trade.core.globals import g, reset_globals
 from bullet_trade.core.models import Order, OrderStatus
-from bullet_trade.core.orders import order, clear_order_queue
+from bullet_trade.core.orders import LimitOrderStyle, MarketOrderStyle, order, clear_order_queue
 from bullet_trade.core.runtime import set_current_engine
 
 
@@ -142,6 +142,105 @@ class AccountBroker(DummyBroker):
             self.sub_account_id = sub_account_id
 
 
+class FillAwareBroker(DummyBroker):
+    def __init__(self, *, fill_price: float):
+        super().__init__()
+        self.fill_price = fill_price
+        self.last_order_id = ""
+        self.submitted_price = 0.0
+        self.submitted_amount = 0
+        self.submitted_security = ""
+        self.submitted_market = False
+
+    async def buy(
+        self,
+        security: str,
+        amount: int,
+        price: float | None = None,
+        wait_timeout: float | None = None,
+        remark: str | None = None,
+        *,
+        market: bool = False,
+    ) -> str:
+        order_id = await super().buy(
+            security,
+            amount,
+            price,
+            wait_timeout=wait_timeout,
+            remark=remark,
+            market=market,
+        )
+        self.last_order_id = order_id
+        self.submitted_price = float(price or 0.0)
+        self.submitted_amount = int(amount)
+        self.submitted_security = security
+        self.submitted_market = bool(market)
+        return order_id
+
+    def sync_account(self):
+        self.account_sync_calls += 1
+        if not self.last_order_id:
+            return {
+                "available_cash": 100000.0,
+                "total_value": 100000.0,
+                "positions": [],
+            }
+        reserved_cash = self.submitted_amount * self.submitted_price
+        return {
+            "available_cash": 100000.0 - reserved_cash,
+            "total_value": 100000.0,
+            "positions": [
+                {
+                    "security": self.submitted_security,
+                    "amount": self.submitted_amount,
+                    "avg_cost": self.submitted_price,
+                    "current_price": self.fill_price,
+                    "market_value": self.fill_price * self.submitted_amount,
+                }
+            ],
+        }
+
+    def sync_orders(self):
+        self.order_sync_calls += 1
+        if not self.last_order_id:
+            return []
+        return [
+            {
+                "order_id": self.last_order_id,
+                "security": self.submitted_security,
+                "status": "filled",
+                "amount": self.submitted_amount,
+                "filled_amount": self.submitted_amount,
+                "price": self.submitted_price,
+                "avg_cost": self.fill_price,
+                "order_price": self.submitted_price,
+                "is_buy": True,
+            }
+        ]
+
+    def get_trades(
+        self,
+        order_id: str | None = None,
+        security: str | None = None,
+    ):
+        if not self.last_order_id:
+            return []
+        if order_id and str(order_id) != self.last_order_id:
+            return []
+        if security and security != self.submitted_security:
+            return []
+        return [
+            {
+                "trade_id": f"{self.last_order_id}-T1",
+                "order_id": self.last_order_id,
+                "security": self.submitted_security,
+                "amount": self.submitted_amount,
+                "price": self.fill_price,
+                "time": datetime.now().isoformat(),
+            }
+        ]
+
+
 def _write_strategy(tmp_path: Path) -> Path:
     src = """
 from bullet_trade.core.scheduler import run_daily
@@ -181,6 +280,11 @@ def every_minute(context):
     path = tmp_path / "strategy_hooks.py"
     path.write_text(src, encoding="utf-8")
     return path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_bullet_trade_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("BULLET_TRADE_HOME", str(tmp_path))
 
 
 def test_live_config_defaults_risk_check_to_false(monkeypatch):
@@ -1066,6 +1170,150 @@ def test_get_orders_from_broker_includes_external_snapshots(tmp_path):
 
     target_order = engine.get_orders(from_broker=True, order_id="B2")
     assert set(target_order.keys()) == {"B2"}
+
+
+def test_apply_order_snapshots_prefers_filled_price_over_order_price(tmp_path):
+    strategy = _write_strategy(tmp_path)
+    cfg = {
+        "runtime_dir": str(tmp_path / "runtime"),
+        "g_autosave_enabled": False,
+        "account_sync_enabled": False,
+        "order_sync_enabled": False,
+        "tick_sync_enabled": False,
+        "risk_check_enabled": False,
+        "broker_heartbeat_interval": 0,
+    }
+    engine = LiveEngine(
+        strategy_file=strategy,
+        broker_factory=DummyBroker,
+        live_config=cfg,
+    )
+    local_order = Order(
+        order_id="local-1",
+        security="159915.XSHE",
+        amount=100,
+        price=3.247,
+        status=OrderStatus.open,
+        is_buy=True,
+    )
+    engine._orders[local_order.order_id] = local_order
+    engine._broker_order_index["B1"] = local_order.order_id
+
+    engine._apply_order_snapshots(
+        [
+            {
+                "order_id": "B1",
+                "security": "159915.XSHE",
+                "status": "filled",
+                "amount": 100,
+                "filled_amount": 100,
+                "price": 3.247,
+                "avg_cost": 3.231,
+                "order_price": 3.247,
+            }
+        ]
+    )
+
+    assert local_order.filled == 100
+    assert local_order.price == pytest.approx(3.231)
+    assert local_order.extra["order_price"] == pytest.approx(3.247)
+
+
+@pytest.mark.asyncio
+async def test_process_orders_reconciles_limit_buy_avg_cost_from_trades(monkeypatch, tmp_path):
+    strategy = _write_strategy(tmp_path)
+    cfg = {
+        "runtime_dir": str(tmp_path / "runtime"),
+        "g_autosave_enabled": False,
+        "account_sync_enabled": False,
+        "order_sync_enabled": False,
+        "tick_sync_enabled": False,
+        "risk_check_enabled": False,
+        "broker_heartbeat_interval": 0,
+    }
+    engine = LiveEngine(
+        strategy_file=strategy,
+        broker_factory=lambda: FillAwareBroker(fill_price=3.231),
+        live_config=cfg,
+    )
+    loop = asyncio.get_running_loop()
+    engine._loop = loop
+    engine._order_lock = asyncio.Lock()
+    engine._stop_event = asyncio.Event()
+    engine.event_bus = EventBus(loop)
+    engine.async_scheduler = AsyncScheduler()
+    engine.broker = FillAwareBroker(fill_price=3.231)
+    engine._risk = None
+    engine.context.portfolio.available_cash = 100000.0
+    engine.context.portfolio.total_value = 100000.0
+    set_current_engine(engine)
+
+    class Snap:
+        paused = False
+        last_price = 3.231
+        high_limit = 3.500
+        low_limit = 3.000
+
+    monkeypatch.setattr("bullet_trade.core.live_engine.get_current_data", lambda: {"159915.XSHE": Snap()})
+
+    clear_order_queue()
+    await asyncio.to_thread(order, "159915.XSHE", 30700, LimitOrderStyle(3.247))
+
+    position = engine.context.portfolio.positions["159915.XSHE"]
+    assert position.total_amount == 30700
+    assert position.avg_cost == pytest.approx(3.231)
+    assert engine.context.portfolio.available_cash == pytest.approx(100000.0 - 30700 * 3.247)
+    set_current_engine(None)
+
+
+@pytest.mark.asyncio
+async def test_process_orders_reconciles_market_buy_avg_cost_from_trades(monkeypatch, tmp_path):
+    strategy = _write_strategy(tmp_path)
+    cfg = {
+        "runtime_dir": str(tmp_path / "runtime"),
+        "g_autosave_enabled": False,
+        "account_sync_enabled": False,
+        "order_sync_enabled": False,
+        "tick_sync_enabled": False,
+        "risk_check_enabled": False,
+        "broker_heartbeat_interval": 0,
+        "market_buy_price_percent": 0.015,
+    }
+    engine = LiveEngine(
+        strategy_file=strategy,
+        broker_factory=lambda: FillAwareBroker(fill_price=3.231),
+        live_config=cfg,
+    )
+    loop = asyncio.get_running_loop()
+    engine._loop = loop
+    engine._order_lock = asyncio.Lock()
+    engine._stop_event = asyncio.Event()
+    engine.event_bus = EventBus(loop)
+    engine.async_scheduler = AsyncScheduler()
+    engine.broker = FillAwareBroker(fill_price=3.231)
+    engine._risk = None
+    engine.context.portfolio.available_cash = 100000.0
+    engine.context.portfolio.total_value = 100000.0
+    set_current_engine(engine)
+
+    class Snap:
+        paused = False
+        last_price = 3.231
+        high_limit = 3.500
+        low_limit = 3.000
+
+    monkeypatch.setattr("bullet_trade.core.live_engine.get_current_data", lambda: {"159915.XSHE": Snap()})
+    monkeypatch.setattr(pricing, "compute_market_protect_price", lambda *args, **kwargs: 3.279)
+
+    clear_order_queue()
+    await asyncio.to_thread(order, "159915.XSHE", 30700, MarketOrderStyle())
+
+    position = engine.context.portfolio.positions["159915.XSHE"]
+    assert position.total_amount == 30700
+    assert position.avg_cost == pytest.approx(3.231)
+    assert engine.broker.submitted_market is True
+    assert engine.broker.submitted_price == pytest.approx(3.279)
+    set_current_engine(None)
 
 
 @pytest.mark.asyncio
