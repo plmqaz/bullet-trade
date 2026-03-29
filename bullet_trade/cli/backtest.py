@@ -5,6 +5,21 @@
 """
 
 from pathlib import Path
+from typing import Optional, Union
+
+
+def _resolve_auto_report_output(output_dir: Path, args) -> Optional[Union[Path, str]]:
+    """
+    为自动报告选择默认输出路径，避免覆盖详细版 report.html。
+
+    当用户未显式指定 --report-output 时，标准化报告默认写入
+    <output>/standard_report.<fmt>。
+    """
+    explicit_output = getattr(args, "report_output", None)
+    if explicit_output:
+        return explicit_output
+    report_format = getattr(args, "report_format", "html")
+    return output_dir / f"standard_report.{report_format}"
 
 
 def run_backtest(args):
@@ -91,9 +106,10 @@ def run_backtest(args):
                         for item in str(args.report_metrics).split(',')
                         if item.strip()
                     ] or None
+                report_output = _resolve_auto_report_output(output_dir, args)
                 report_path = generate_cli_report(
                     input_dir=str(output_dir),
-                    output_path=None,
+                    output_path=str(report_output) if report_output is not None else None,
                     fmt=getattr(args, 'report_format', 'html'),
                     template_path=getattr(args, 'report_template', None),
                     metrics_keys=metrics_keys,

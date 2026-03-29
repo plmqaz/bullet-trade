@@ -233,6 +233,12 @@ def create_parser():
         default=None,
         help='报告标题（默认使用输出目录名称）'
     )
+    backtest_parser.add_argument(
+        '--report-output',
+        type=str,
+        default=None,
+        help='自动报告输出路径（默认写入 <output>/standard_report.<format>）'
+    )
     
     # optimize 命令
     optimize_parser = subparsers.add_parser(

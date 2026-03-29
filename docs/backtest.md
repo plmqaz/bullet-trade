@@ -81,7 +81,7 @@ bullet-trade backtest [-h] strategy_file --start START --end END
                       [--log LOG] [--images] [--no-csv] [--no-html] [--no-logs]
                       [--auto-report] [--report-format {html,pdf}]
                       [--report-template TEMPLATE] [--report-metrics METRICS]
-                      [--report-title TITLE]
+                      [--report-title TITLE] [--report-output REPORT_OUTPUT]
 ```
 
 ### 必填参数
@@ -106,7 +106,7 @@ bullet-trade backtest [-h] strategy_file --start START --end END
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--images` | 关闭 | 生成 PNG 图表（净值曲线、持仓分布） |
+| `--images` | 关闭 | 额外导出独立 PNG 图表文件，不影响 `report.html` 内嵌图表 |
 | `--no-csv` | 开启 | 禁用 CSV 导出 |
 | `--no-html` | 开启 | 禁用 HTML 报告 |
 | `--no-logs` | 开启 | 禁用日志落盘 |
@@ -115,11 +115,12 @@ bullet-trade backtest [-h] strategy_file --start START --end END
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--auto-report` | 关闭 | 回测完成后自动生成标准化报告 |
+| `--auto-report` | 关闭 | 回测完成后额外生成标准化报告，不覆盖默认详细版 `report.html` |
 | `--report-format` | `html` | 报告格式：`html` 或 `pdf` |
 | `--report-template` | 无 | 自定义报告模板路径 |
 | `--report-metrics` | 无 | 报告中展示的指标（逗号分隔） |
 | `--report-title` | 无 | 报告标题（默认使用输出目录名） |
+| `--report-output` | 自动 | 自动报告输出路径，默认写入 `<output>/standard_report.<format>` |
 
 ## 推荐设置：真实价格 + 分红送股
 
