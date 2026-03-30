@@ -122,3 +122,77 @@ def test_v2_normalize_market_order_row_uses_fill_price_not_protect_price():
     assert row["price"] == pytest.approx(3.231)
     assert row["avg_cost"] == pytest.approx(3.231)
     assert row["order_price"] == pytest.approx(3.279)
+
+
+@pytest.mark.unit
+def test_v2_normalize_order_row_prefers_explicit_traded_price_when_service_returns_order_price():
+    broker = _build_broker()
+
+    row = broker._normalize_order_row(
+        {
+            "order_id": "1082136092",
+            "security": "159915.SZ",
+            "side": "BUY",
+            "amount": 30700,
+            "filled_amount": 30700,
+            "price": 3.247,
+            "order_price": 3.247,
+            "traded_price": 3.231,
+            "avg_price": 3.231,
+            "deal_balance": 99201.7,
+            "style_type": "limit",
+            "status": "filled",
+        }
+    )
+
+    assert row["price"] == pytest.approx(3.231)
+    assert row["avg_cost"] == pytest.approx(3.231)
+    assert row["order_price"] == pytest.approx(3.247)
+    assert row["deal_balance"] == pytest.approx(99201.7)
+
+
+@pytest.mark.unit
+def test_v2_normalize_order_row_derives_fill_price_from_deal_balance_without_falling_back_to_order_price():
+    broker = _build_broker()
+
+    row = broker._normalize_order_row(
+        {
+            "order_id": "1082136093",
+            "security": "159915.SZ",
+            "side": "BUY",
+            "amount": 30700,
+            "filled_amount": 30700,
+            "price": 3.247,
+            "order_price": 3.247,
+            "deal_balance": 99201.7,
+            "style_type": "limit",
+            "status": "filled",
+        }
+    )
+
+    assert row["price"] == pytest.approx(99201.7 / 30700)
+    assert row["avg_cost"] == pytest.approx(99201.7 / 30700)
+    assert row["order_price"] == pytest.approx(3.247)
+
+
+@pytest.mark.unit
+def test_v2_normalize_order_row_does_not_use_order_price_as_fill_price_when_fill_fields_missing():
+    broker = _build_broker()
+
+    row = broker._normalize_order_row(
+        {
+            "order_id": "1082136094",
+            "security": "159915.SZ",
+            "side": "BUY",
+            "amount": 30700,
+            "filled_amount": 30700,
+            "price": 3.247,
+            "order_price": 3.247,
+            "style_type": "limit",
+            "status": "filled",
+        }
+    )
+
+    assert row["price"] == pytest.approx(0.0)
+    assert row["avg_cost"] == pytest.approx(0.0)
+    assert row["order_price"] == pytest.approx(3.247)
