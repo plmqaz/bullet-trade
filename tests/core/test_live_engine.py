@@ -330,6 +330,19 @@ def _prime_live_engine(engine: LiveEngine, broker: BrokerBase) -> None:
     engine.context.portfolio.total_value = 100000.0
 
 
+class LifecycleBroker(DummyBroker):
+    def __init__(self):
+        super().__init__()
+        self.before_open_calls = 0
+        self.after_close_calls = 0
+
+    def before_open(self) -> None:
+        self.before_open_calls += 1
+
+    def after_close(self) -> None:
+        self.after_close_calls += 1
+
+
 def _write_strategy(tmp_path: Path) -> Path:
     src = """
 from bullet_trade.core.scheduler import run_daily
@@ -1864,3 +1877,61 @@ def test_live_engine_run_returns_nonzero_on_error(tmp_path, monkeypatch, caplog)
     exit_code = engine.run()
     assert exit_code == 2
     assert "missing xtquant" in caplog.text
+
+
+def test_dummy_broker_lifecycle_hooks_default_to_noop():
+    broker = DummyBroker()
+
+    assert broker.before_open() is None
+    assert broker.after_close() is None
+
+
+@pytest.mark.asyncio
+async def test_live_engine_triggers_broker_lifecycle_hooks_at_safe_markers(tmp_path):
+    strategy = _write_strategy(tmp_path)
+    engine = LiveEngine(
+        strategy_file=strategy,
+        broker_factory=LifecycleBroker,
+        live_config={"runtime_dir": str(tmp_path / "runtime")},
+    )
+    broker = LifecycleBroker()
+    engine._loop = asyncio.get_running_loop()
+    engine.event_bus = EventBus(engine._loop)
+    engine.broker = broker
+    engine.context.portfolio.total_value = 1_000_000
+    current_day = date(2026, 4, 3)
+    engine._pre_open_dt = datetime.combine(current_day, Time(9, 0))
+    engine._open_dt = datetime.combine(current_day, Time(9, 30))
+    engine._close_dt = datetime.combine(current_day, Time(15, 0))
+    engine._post_close_dt = datetime.combine(current_day, Time(15, 31))
+
+    await engine._maybe_emit_market_events(datetime.combine(current_day, Time(9, 0)))
+    await engine._maybe_emit_market_events(datetime.combine(current_day, Time(15, 31)))
+
+    assert broker.before_open_calls == 1
+    assert broker.after_close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_live_engine_does_not_backfill_broker_before_open_after_market_open(tmp_path):
+    strategy = _write_strategy(tmp_path)
+    engine = LiveEngine(
+        strategy_file=strategy,
+        broker_factory=LifecycleBroker,
+        live_config={"runtime_dir": str(tmp_path / "runtime")},
+    )
+    broker = LifecycleBroker()
+    engine._loop = asyncio.get_running_loop()
+    engine.event_bus = EventBus(engine._loop)
+    engine.broker = broker
+    engine.context.portfolio.total_value = 1_000_000
+    current_day = date(2026, 4, 3)
+    engine._pre_open_dt = datetime.combine(current_day, Time(9, 0))
+    engine._open_dt = datetime.combine(current_day, Time(9, 30))
+    engine._close_dt = datetime.combine(current_day, Time(15, 0))
+    engine._post_close_dt = datetime.combine(current_day, Time(15, 31))
+
+    await engine._maybe_emit_market_events(datetime.combine(current_day, Time(14, 0)))
+
+    assert broker.before_open_calls == 0
+    assert broker.after_close_calls == 0

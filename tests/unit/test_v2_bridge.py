@@ -24,10 +24,14 @@ V2ClientConfig = v2_bridge.V2ClientConfig
 class DummyClient:
     def __init__(self, responses):
         self.responses = dict(responses)
+        self.calls = []
 
     def request(self, action, payload=None, timeout=None):
-        _ = payload, timeout
-        return self.responses.get(action)
+        self.calls.append((action, payload, timeout))
+        value = self.responses.get(action)
+        if isinstance(value, Exception):
+            raise value
+        return value
 
 
 def _build_broker() -> AiStocksV2Broker:
@@ -103,6 +107,59 @@ def test_v2_sync_account_preserves_zero_closeable_amount():
 
     assert snapshot["positions"][0]["amount"] == 33800
     assert snapshot["positions"][0]["closeable_amount"] == 0
+
+
+@pytest.mark.unit
+def test_v2_before_open_calls_admin_action():
+    broker = _build_broker()
+    client = DummyClient(
+        {
+            "admin.before_open": {
+                "status": "executed",
+                "reason": "ok",
+            }
+        }
+    )
+    broker.client = client
+
+    broker.before_open()
+
+    assert client.calls[0][0] == "admin.before_open"
+
+
+@pytest.mark.unit
+def test_v2_after_close_calls_admin_action():
+    broker = _build_broker()
+    client = DummyClient(
+        {
+            "admin.after_close": {
+                "status": "executed",
+                "reason": "ok",
+            }
+        }
+    )
+    broker.client = client
+
+    broker.after_close()
+
+    assert client.calls[0][0] == "admin.after_close"
+
+
+@pytest.mark.unit
+def test_v2_lifecycle_hooks_ignore_old_service_without_action_support():
+    broker = _build_broker()
+    client = DummyClient(
+        {
+            "admin.before_open": v2_bridge.V2BridgeError("action not implemented: admin.before_open"),
+            "admin.after_close": v2_bridge.V2BridgeError("action not implemented: admin.after_close"),
+        }
+    )
+    broker.client = client
+
+    broker.before_open()
+    broker.after_close()
+
+    assert [item[0] for item in client.calls] == ["admin.before_open", "admin.after_close"]
 
 
 @pytest.mark.unit

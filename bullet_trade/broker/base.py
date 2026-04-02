@@ -290,6 +290,18 @@ class BrokerBase(ABC):
 
 
 
+    def before_open(self) -> None:
+
+        """盘前生命周期钩子，默认空实现。"""
+
+        return None
+
+    def after_close(self) -> None:
+
+        """盘后生命周期钩子，默认空实现。"""
+
+        return None
+
     def heartbeat(self) -> None:
 
         """触发一次心跳检测，默认空实现。

@@ -94,6 +94,8 @@ from .risk_control import get_global_risk_controller
 from .engine import PRE_MARKET_OFFSET, BacktestEngine
 from . import pricing
 
+POST_MARKET_OFFSET = timedelta(minutes=31)
+
 
 @dataclass
 class LiveConfig:
@@ -218,6 +220,7 @@ class LiveEngine:
         self._open_dt: Optional[datetime] = None
         self._close_dt: Optional[datetime] = None
         self._pre_open_dt: Optional[datetime] = None
+        self._post_close_dt: Optional[datetime] = None
         self._markers_fired: Set[str] = set()
         self._last_schedule_dt: Optional[datetime] = None
         self._trade_calendar: Dict[date, Dict[str, Any]] = {}
@@ -495,6 +498,7 @@ class LiveEngine:
         self._open_dt = open_dt
         self._close_dt = close_dt
         self._pre_open_dt = open_dt - PRE_MARKET_OFFSET
+        self._post_close_dt = close_dt + POST_MARKET_OFFSET
         self.context.previous_date = self._previous_trade_day
 
         await self.event_bus.emit(TradingDayStartEvent(date=current_date))
@@ -575,6 +579,10 @@ class LiveEngine:
             self._markers_fired.add('pre_open')
             await self.event_bus.emit(BeforeTradingStartEvent(date=dt.date()))
             await self._call_hook(self.before_trading_start_func)
+            if not self._open_dt or dt < self._open_dt:
+                await self._call_broker_lifecycle_hook("before_open")
+            else:
+                log.info("跳过 broker.before_open：当前时间已过开盘时间 %s", self._open_dt.strftime("%H:%M:%S"))
 
         if self._open_dt and 'open' not in self._markers_fired and dt >= self._open_dt:
             self._markers_fired.add('open')
@@ -592,6 +600,10 @@ class LiveEngine:
                 date=dt.date(),
                 portfolio_value=self.context.portfolio.total_value,
             ))
+
+        if self._post_close_dt and 'post_close' not in self._markers_fired and dt >= self._post_close_dt:
+            self._markers_fired.add('post_close')
+            await self._call_broker_lifecycle_hook("after_close")
 
     async def _maybe_handle_data(self, dt: datetime) -> None:
         if not self.handle_data_func:
@@ -2133,6 +2145,21 @@ class LiveEngine:
         else:
             assert self._loop is not None
             await self._loop.run_in_executor(None, lambda: func(*args))
+
+    async def _call_broker_lifecycle_hook(self, hook_name: str) -> None:
+        if not self.broker:
+            return
+        hook = getattr(self.broker, hook_name, None)
+        if not callable(hook):
+            return
+        try:
+            if asyncio.iscoroutinefunction(hook):
+                await hook()
+            else:
+                assert self._loop is not None
+                await self._loop.run_in_executor(None, hook)
+        except Exception as exc:
+            log.warning(f"broker 生命周期钩子 {hook_name} 执行失败: {exc}")
 
     def _migrate_scheduler_tasks(self) -> None:
         from .scheduler import get_tasks
