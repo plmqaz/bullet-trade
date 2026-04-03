@@ -446,24 +446,38 @@ class QmtBrokerAdapter(RemoteBrokerAdapter):
             logger.info(f"{security} 数量从 {raw_amount} 取整为 {amount}")
         
         # ========== 4. 价格处理 ==========
-        price = style.get("price")
+        requested_price = style.get("price")
+        if requested_price in (None, ""):
+            requested_price = style.get("protect_price")
+        if requested_price in (None, ""):
+            requested_price = payload.get("price")
+        price = requested_price
         
         if is_market:
-            # 市价单：服务端统一计算价格笼子，忽略客户端传入的 protect_price
-            live_cfg = get_live_trade_config()
-            buy_percent = float(live_cfg.get("market_buy_price_percent", 0.015))
-            sell_percent = float(live_cfg.get("market_sell_price_percent", -0.015))
-            percent = buy_percent if is_buy else sell_percent
-            
-            price = pricing.compute_market_protect_price(
-                security,
-                last_price,
-                high_limit,
-                low_limit,
-                percent,
-                is_buy,
-            )
-            logger.info(f"{security} 市价单保护价: {price:.4f}（基准价={last_price:.4f}, 比例={percent*100:.2f}%）")
+            if price not in (None, ""):
+                price = float(price)
+                logger.info(
+                    f"{security} 市价单沿用客户端保护价: {price:.4f} "
+                    f"（基准价={last_price:.4f}）"
+                )
+            else:
+                live_cfg = get_live_trade_config()
+                buy_percent = float(live_cfg.get("market_buy_price_percent", 0.015))
+                sell_percent = float(live_cfg.get("market_sell_price_percent", -0.015))
+                percent = buy_percent if is_buy else sell_percent
+                
+                price = pricing.compute_market_protect_price(
+                    security,
+                    last_price,
+                    high_limit,
+                    low_limit,
+                    percent,
+                    is_buy,
+                )
+                logger.info(
+                    f"{security} 市价单保护价: {price:.4f} "
+                    f"（基准价={last_price:.4f}, 比例={percent*100:.2f}%）"
+                )
         else:
             # 限价单：校验价格是否在涨跌停范围内
             if price is None:
@@ -501,10 +515,18 @@ class QmtBrokerAdapter(RemoteBrokerAdapter):
             )
         
         if isinstance(order, str):
-            return {"order_id": order, "amount": amount, "price": price}
+            return {
+                "order_id": order,
+                "amount": amount,
+                "price": price,
+                "order_price": price,
+                "requested_order_price": price,
+            }
         result = order or {}
         result["amount"] = amount
         result["price"] = price
+        result.setdefault("order_price", price)
+        result.setdefault("requested_order_price", price)
         return result
     
     async def _get_live_snapshot(self, security: str) -> Dict[str, Any]:

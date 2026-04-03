@@ -689,6 +689,16 @@ class LiveEngine:
                     price_repr = f"{price_value:.4f}" if price_value else "未指定"
                     price_mode = "市价" if market_flag else "限价"
                     action_label = "买入" if plan.is_buy else "卖出"
+                    try:
+                        extra = getattr(order, "extra", None)
+                        if extra is None:
+                            order.extra = {}
+                            extra = order.extra
+                        if price_arg is not None:
+                            extra.setdefault("order_price", price_arg)
+                            extra.setdefault("requested_order_price", price_arg)
+                    except Exception:
+                        pass
                     log.info(
                         f"执行委托[{action_label}] {plan.security}: 行情价={plan.last_price:.4f}, "
                         f"委托价={price_repr}（{price_mode}），风格={style_name}, 数量={plan.amount}"
@@ -1225,6 +1235,7 @@ class LiveEngine:
             order_remark = snap.get("order_remark") or snap.get("remark")
             strategy_name = snap.get("strategy_name")
             order_price = snap.get("order_price")
+            style_type = str(snap.get("style_type") or snap.get("style") or "").strip().lower()
             if order_remark or strategy_name or order_price is not None:
                 try:
                     extra = getattr(order, "extra", None)
@@ -1236,7 +1247,16 @@ class LiveEngine:
                     if strategy_name:
                         extra["strategy_name"] = strategy_name
                     if order_price is not None:
-                        extra["order_price"] = order_price
+                        existing_order_price = extra.get("order_price")
+                        if (
+                            style_type == "market"
+                            and existing_order_price is not None
+                            and existing_order_price != order_price
+                        ):
+                            extra.setdefault("requested_order_price", existing_order_price)
+                            extra["broker_order_price"] = order_price
+                        else:
+                            extra["order_price"] = order_price
                 except Exception:
                     pass
             normalized_status = self._normalize_status(getattr(order, "status", None))
@@ -1255,6 +1275,9 @@ class LiveEngine:
                     broker_order_id=broker_oid,
                     status=normalized_status,
                     resolved_price=resolved_price,
+                    requested_order_price=getattr(order, "extra", {}).get("requested_order_price")
+                    or getattr(order, "extra", {}).get("order_price"),
+                    broker_order_price=getattr(order, "extra", {}).get("broker_order_price"),
                     amount=getattr(order, "amount", None),
                     filled=resolved_filled,
                     snapshot=self._compact_order_snapshot(snap),
@@ -1311,12 +1334,22 @@ class LiveEngine:
             extra["source"] = "broker"
             extra["is_external"] = False
             extra["engine_order_id"] = mapped_order_id
+            style_type = str(snapshot.get("style_type") or snapshot.get("style") or "").strip().lower()
             if order_remark is not None:
                 extra["order_remark"] = order_remark
             if strategy_name is not None:
                 extra["strategy_name"] = strategy_name
             if order_price is not None:
-                extra["order_price"] = order_price
+                existing_order_price = extra.get("order_price")
+                if (
+                    style_type == "market"
+                    and existing_order_price is not None
+                    and existing_order_price != order_price
+                ):
+                    extra.setdefault("requested_order_price", existing_order_price)
+                    extra["broker_order_price"] = order_price
+                else:
+                    extra["order_price"] = order_price
             if order_sysid is not None:
                 extra["order_sysid"] = order_sysid
             if raw_status is not None:

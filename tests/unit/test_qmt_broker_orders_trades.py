@@ -116,3 +116,33 @@ def test_qmt_broker_order_snapshot_fields(monkeypatch):
     assert order.get("is_buy") is True
     assert order.get("order_remark") == "bt:alpha:abcd1234"
     assert order.get("strategy_name") == "alpha"
+
+
+@pytest.mark.unit
+def test_qmt_broker_sync_orders_market_row_does_not_treat_broker_price_as_requested_order_price():
+    broker = QmtBroker(account_id="demo")
+    broker._connected = True
+
+    class DummyTrader:
+        def query_stock_orders(self, account):
+            return [
+                {
+                    "order_id": "1098912911",
+                    "stock_code": "159967.SZ",
+                    "order_status": "filled",
+                    "order_volume": 1000,
+                    "traded_volume": 1000,
+                    "price": 0.634,
+                    "traded_price": 0.634,
+                    "price_type": "market",
+                    "order_type": "sell",
+                }
+            ]
+
+    broker._xt_trader = DummyTrader()
+    broker._xt_account = object()
+
+    row = broker.sync_orders()[0]
+    assert row["price"] == pytest.approx(0.634)
+    assert row["order_price"] is None
+    assert row["broker_price"] == pytest.approx(0.634)

@@ -1321,6 +1321,57 @@ def test_apply_order_snapshots_prefers_filled_price_over_order_price(tmp_path):
     assert local_order.extra["order_price"] == pytest.approx(3.247)
 
 
+def test_apply_order_snapshots_preserves_requested_market_price_when_broker_reports_different_order_price(tmp_path):
+    strategy = _write_strategy(tmp_path)
+    cfg = {
+        "runtime_dir": str(tmp_path / "runtime"),
+        "g_autosave_enabled": False,
+        "account_sync_enabled": False,
+        "order_sync_enabled": False,
+        "tick_sync_enabled": False,
+        "risk_check_enabled": False,
+        "broker_heartbeat_interval": 0,
+    }
+    engine = LiveEngine(
+        strategy_file=str(strategy),
+        broker_factory=DummyBroker,
+        live_config=cfg,
+    )
+    local_order = Order(
+        order_id="local-1",
+        security="159967.XSHE",
+        amount=1000,
+        price=0.0,
+        status=OrderStatus.open,
+        is_buy=False,
+        style=MarketOrderStyle(),
+        extra={"order_price": 0.626, "requested_order_price": 0.626},
+    )
+    engine._orders[local_order.order_id] = local_order
+    engine._broker_order_index["B1"] = local_order.order_id
+
+    engine._apply_order_snapshots(
+        [
+            {
+                "order_id": "B1",
+                "security": "159967.XSHE",
+                "status": "filled",
+                "amount": 1000,
+                "filled_amount": 1000,
+                "price": 0.634,
+                "avg_cost": 0.634,
+                "order_price": 0.634,
+                "style_type": "market",
+            }
+        ]
+    )
+
+    assert local_order.price == pytest.approx(0.634)
+    assert local_order.extra["order_price"] == pytest.approx(0.626)
+    assert local_order.extra["requested_order_price"] == pytest.approx(0.626)
+    assert local_order.extra["broker_order_price"] == pytest.approx(0.634)
+
+
 def test_apply_order_snapshots_debug_logs_only_on_signature_change(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("BT_LIVE_ORDER_DEBUG", "1")
     caplog.set_level("INFO", logger="jq_strategy")

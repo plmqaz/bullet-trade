@@ -574,6 +574,8 @@ class QmtBroker(BrokerBase):
                     status = None
                     code = None
                     price = None
+                    explicit_order_price = None
+                    price_type = None
                     qty = None
                     filled = None
                     traded_price = None
@@ -591,6 +593,8 @@ class QmtBroker(BrokerBase):
                         order_type = it.get("order_type")
                         order_remark = it.get("order_remark") or it.get("remark")
                         strategy_name = it.get("strategy_name") or it.get("strategy")
+                        explicit_order_price = it.get("order_price")
+                        price_type = it.get("price_type") or it.get("priceType")
                     else:
                         for attr in ("order_id", "orderId", "entrust_id"):
                             if hasattr(it, attr):
@@ -620,7 +624,19 @@ class QmtBroker(BrokerBase):
                             order_remark = getattr(it, "order_remark")
                         if hasattr(it, "strategy_name"):
                             strategy_name = getattr(it, "strategy_name")
+                        if hasattr(it, "order_price"):
+                            explicit_order_price = getattr(it, "order_price")
+                        for attr in ("price_type", "priceType"):
+                            if hasattr(it, attr):
+                                price_type = getattr(it, attr)
+                                break
                     if str(oid) == str(order_id):
+                        if explicit_order_price is not None:
+                            order_price = explicit_order_price
+                        elif self._is_market_price_type(price_type) and traded_price is not None:
+                            order_price = None
+                        else:
+                            order_price = price
                         mapped_status = self._map_order_status(status)
                         _emit_order_debug(
                             "order_status_raw",
@@ -628,7 +644,8 @@ class QmtBroker(BrokerBase):
                             security=code,
                             raw_status=status,
                             mapped_status=mapped_status.value if isinstance(mapped_status, OrderStatus) else mapped_status,
-                            order_price=price,
+                            order_price=order_price,
+                            broker_price=price,
                             traded_price=traded_price,
                             filled=filled,
                             amount=qty,
@@ -642,6 +659,7 @@ class QmtBroker(BrokerBase):
                             "raw_status": status,
                             "security": code,
                             "price": traded_price or price,
+                            "order_price": order_price,
                             "amount": qty,
                             "filled": filled,
                             "order_type": order_type,
@@ -752,6 +770,45 @@ class QmtBroker(BrokerBase):
         if label in ("sell", "stock_sell", "s", "short"):
             return False
         return None
+
+    def _is_market_price_type(self, price_type: Any) -> bool:
+        if price_type is None:
+            return False
+        try:
+            from xtquant import xtconstant  # type: ignore
+
+            market_values = {
+                getattr(xtconstant, "MARKET_SH_CONVERT_5_CANCEL", None),
+                getattr(xtconstant, "MARKET_SZ_CONVERT_5_CANCEL", None),
+                getattr(xtconstant, "MARKET_PEER_PRICE_FIRST", None),
+                getattr(xtconstant, "MARKET_MINE_PRICE_FIRST", None),
+                getattr(xtconstant, "ANY_PRICE", None),
+                getattr(xtconstant, "ORDER_PRICE_TYPE_MARKET", None),
+                getattr(xtconstant, "ORDER_PRICE_TYPE_BEST5_OR_CANCEL", None),
+                getattr(xtconstant, "ORDER_PRICE_TYPE_FIVE_LEVEL_INSTANT_OR_CANCEL", None),
+                getattr(xtconstant, "MARKET_PRICE", None),
+            }
+            market_values.discard(None)
+            if price_type in market_values:
+                return True
+        except Exception:
+            pass
+        label = str(price_type).strip().lower()
+        return any(
+            token in label
+            for token in (
+                "market",
+                "best",
+                "peer",
+                "mine",
+                "any_price",
+                "对手方最优",
+                "本方最优",
+                "五档",
+                "即时成交",
+                "最优价",
+            )
+        )
 
     # ---------------- 内部辅助 ----------------
     def _split_volume(self, total: int) -> List[int]:
@@ -1084,7 +1141,7 @@ class QmtBroker(BrokerBase):
                 oid = _pick(item, "order_id", "entrust_id")
                 code = _pick(item, "stock_code", "code")
                 amount = _pick(item, "order_volume", "volume")
-                order_price = _pick(item, "price", "order_price")
+                raw_price = _pick(item, "price")
                 status = _pick(item, "order_status", "status")
                 filled = _pick(item, "traded_volume", "deal_volume", "filled_volume", "volume_traded")
                 traded_price = _pick(item, "traded_price", "avg_price", "trade_price")
@@ -1095,6 +1152,13 @@ class QmtBroker(BrokerBase):
                 status_msg = _pick(item, "status_msg", "status_msg")
                 price_type = _pick(item, "price_type", "priceType")
                 order_time = _pick(item, "order_time", "time")
+                explicit_order_price = _pick(item, "order_price")
+                if explicit_order_price is not None:
+                    order_price = explicit_order_price
+                elif self._is_market_price_type(price_type) and traded_price is not None:
+                    order_price = None
+                else:
+                    order_price = raw_price
                 if not oid:
                     continue
                 orders.append(
@@ -1114,6 +1178,7 @@ class QmtBroker(BrokerBase):
                         "status_msg": status_msg,
                         "price_type": price_type,
                         "order_time": order_time,
+                        "broker_price": raw_price,
                     }
                 )
                 _emit_order_debug(
@@ -1122,6 +1187,7 @@ class QmtBroker(BrokerBase):
                     security=self._map_to_jq_symbol(code) if code else None,
                     raw_status=status,
                     order_price=order_price,
+                    broker_price=raw_price,
                     traded_price=traded_price,
                     filled=filled,
                     amount=amount,
