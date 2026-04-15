@@ -1372,6 +1372,52 @@ def test_apply_order_snapshots_preserves_requested_market_price_when_broker_repo
     assert local_order.extra["broker_order_price"] == pytest.approx(0.634)
 
 
+def test_apply_order_snapshots_preserves_settlement_state_fields(tmp_path):
+    strategy = _write_strategy(tmp_path)
+    cfg = {
+        "runtime_dir": str(tmp_path / "runtime"),
+        "g_autosave_enabled": False,
+        "account_sync_enabled": False,
+        "order_sync_enabled": False,
+        "tick_sync_enabled": False,
+        "risk_check_enabled": False,
+        "broker_heartbeat_interval": 0,
+    }
+    engine = LiveEngine(
+        strategy_file=strategy,
+        broker_factory=DummyBroker,
+        live_config=cfg,
+    )
+    local_order = Order(
+        order_id="local-1",
+        security="127085.XSHE",
+        amount=750,
+        price=130.881,
+        status=OrderStatus.open,
+        is_buy=True,
+    )
+    engine._orders[local_order.order_id] = local_order
+    engine._broker_order_index["B1"] = local_order.order_id
+
+    engine._apply_order_snapshots(
+        [
+            {
+                "order_id": "B1",
+                "security": "127085.XSHE",
+                "status": "canceled",
+                "amount": 750,
+                "filled_amount": 0,
+                "order_price": 130.881,
+                "settlement_state": "pending",
+                "settlement_pending_reason": "[pending_settlement] filled_amount=750 缺少可信 traded_price/deal_balance",
+            }
+        ]
+    )
+
+    assert local_order.extra["settlement_state"] == "pending"
+    assert "pending_settlement" in local_order.extra["settlement_pending_reason"]
+
+
 def test_apply_order_snapshots_debug_logs_only_on_signature_change(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("BT_LIVE_ORDER_DEBUG", "1")
     caplog.set_level("INFO", logger="jq_strategy")

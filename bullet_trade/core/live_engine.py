@@ -1236,7 +1236,15 @@ class LiveEngine:
             strategy_name = snap.get("strategy_name")
             order_price = snap.get("order_price")
             style_type = str(snap.get("style_type") or snap.get("style") or "").strip().lower()
-            if order_remark or strategy_name or order_price is not None:
+            settlement_state = snap.get("settlement_state")
+            settlement_pending_reason = snap.get("settlement_pending_reason")
+            if (
+                order_remark
+                or strategy_name
+                or order_price is not None
+                or settlement_state not in (None, "")
+                or settlement_pending_reason not in (None, "")
+            ):
                 try:
                     extra = getattr(order, "extra", None)
                     if extra is None:
@@ -1257,6 +1265,10 @@ class LiveEngine:
                             extra["broker_order_price"] = order_price
                         else:
                             extra["order_price"] = order_price
+                    if settlement_state not in (None, ""):
+                        extra["settlement_state"] = settlement_state
+                    if settlement_pending_reason not in (None, ""):
+                        extra["settlement_pending_reason"] = settlement_pending_reason
                 except Exception:
                     pass
             normalized_status = self._normalize_status(getattr(order, "status", None))
@@ -1328,6 +1340,8 @@ class LiveEngine:
         order_price = snapshot.get("order_price")
         order_sysid = snapshot.get("order_sysid")
         raw_status = snapshot.get("raw_status")
+        settlement_state = snapshot.get("settlement_state")
+        settlement_pending_reason = snapshot.get("settlement_pending_reason")
 
         if mapped is not None:
             extra = dict(getattr(mapped, "extra", {}) or {})
@@ -1354,6 +1368,10 @@ class LiveEngine:
                 extra["order_sysid"] = order_sysid
             if raw_status is not None:
                 extra["raw_status"] = raw_status
+            if settlement_state not in (None, ""):
+                extra["settlement_state"] = settlement_state
+            if settlement_pending_reason not in (None, ""):
+                extra["settlement_pending_reason"] = settlement_pending_reason
             return Order(
                 order_id=broker_order_id,
                 security=mapped.security,
@@ -1396,6 +1414,10 @@ class LiveEngine:
             extra["order_sysid"] = order_sysid
         if raw_status is not None:
             extra["raw_status"] = raw_status
+        if settlement_state not in (None, ""):
+            extra["settlement_state"] = settlement_state
+        if settlement_pending_reason not in (None, ""):
+            extra["settlement_pending_reason"] = settlement_pending_reason
 
         return Order(
             order_id=broker_order_id,

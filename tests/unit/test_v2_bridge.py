@@ -287,6 +287,29 @@ def test_v2_normalize_order_row_does_not_use_order_price_as_fill_price_when_fill
 
 
 @pytest.mark.unit
+def test_v2_normalize_order_row_preserves_settlement_state_fields():
+    broker = _build_broker()
+
+    row = broker._normalize_order_row(
+        {
+            "order_id": "1082136095",
+            "security": "127085.SZ",
+            "side": "BUY",
+            "amount": 750,
+            "filled_amount": 0,
+            "order_price": 130.881,
+            "status": "canceled",
+            "settlement_state": "pending",
+            "settlement_pending_reason": "[pending_settlement] filled_amount=750 缺少可信 traded_price/deal_balance",
+        }
+    )
+
+    assert row["status"] == "canceled"
+    assert row["settlement_state"] == "pending"
+    assert "pending_settlement" in row["settlement_pending_reason"]
+
+
+@pytest.mark.unit
 def test_v2_normalize_trade_row_preserves_zero_commission_fee():
     broker = _build_broker()
 
