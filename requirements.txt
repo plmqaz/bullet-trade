@@ -14,6 +14,7 @@ jqdatasdk>=1.8.0
 
 # 科学计算
 scipy>=1.7.0
+matplotlib>=3.7.0
 
 # 测试
 pytest>=7.0.0
