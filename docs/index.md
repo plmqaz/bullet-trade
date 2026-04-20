@@ -45,8 +45,15 @@ BulletTrade 是一套兼容聚宽 API 的量化研究与交易框架，支持多
   ```
 - 开发/贡献模式：
   ```bash
-  pip install -e "bullet-trade[dev]"
-  cp bullet-trade/env.example bullet-trade/.env
+  pip install -e ".[dev]"
+  # macos/linux
+  cp env.example .env
+  # windows (cmd)
+  copy env.example .env
+  ```
+- 安装全部可选依赖：
+  ```bash
+  pip install -e ".[all]"
   ```
 - 安装后可用 `python -m bullet_trade.cli --help` 或 `bullet-trade --version` 检查。
 

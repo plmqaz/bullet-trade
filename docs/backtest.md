@@ -48,9 +48,16 @@
 
 1) 安装与模板：
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e "bullet-trade[dev]"
+python -m venv .venv
+# macos/linux
+source .venv/bin/activate
+# windows (cmd)
+.venv\Scripts\activate.bat
+pip install -e ".[dev]"
+# macos/linux
 cp env.backtest.example .env
+# windows (cmd)
+copy env.backtest.example .env
 ```
 
 2) 只填本页用到的变量（其余见 [配置总览](config.md)）：
