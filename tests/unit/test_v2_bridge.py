@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,39 @@ def test_v2_sync_account_preserves_zero_closeable_amount():
 
     assert snapshot["positions"][0]["amount"] == 33800
     assert snapshot["positions"][0]["closeable_amount"] == 0
+
+
+@pytest.mark.unit
+def test_v2_sync_account_preserves_position_time_fields():
+    broker = _build_broker()
+    buy_dt = datetime(2026, 4, 21, 9, 40, 0)
+    last_trade_dt = datetime(2026, 4, 21, 10, 36, 0)
+    broker.client = DummyClient(
+        {
+            "broker.account": {
+                "available_cash": 100000.0,
+                "frozen_cash": 0.0,
+                "total_asset": 100000.0,
+            },
+            "broker.positions": [
+                {
+                    "security": "159915.SZ",
+                    "amount": 5400,
+                    "available_amount": 0,
+                    "open_price": 3.620,
+                    "last_price": 3.634,
+                    "position_value": 19623.6,
+                    "init_time": buy_dt.isoformat(),
+                    "transact_time": last_trade_dt.isoformat(),
+                }
+            ],
+        }
+    )
+
+    snapshot = broker.sync_account()
+
+    assert snapshot["positions"][0]["init_time"] == buy_dt.isoformat()
+    assert snapshot["positions"][0]["transact_time"] == last_trade_dt.isoformat()
 
 
 @pytest.mark.unit

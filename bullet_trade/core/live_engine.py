@@ -2367,6 +2367,17 @@ class LiveEngine:
         return None
 
     @staticmethod
+    def _parse_datetime_value(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
     def _serialize_slippage_config(config: Any) -> Optional[Dict[str, Any]]:
         if isinstance(config, PriceRelatedSlippage):
             return {'class': 'PriceRelatedSlippage', 'ratio': float(config.ratio)}
@@ -2647,6 +2658,10 @@ class LiveEngine:
                     avg_cost=float(item.get('avg_cost', 0.0) or 0.0),
                     price=price,
                     value=float(item.get('market_value', amount * price)),
+                    buy_time=self._parse_datetime_value(item.get('buy_time', item.get('init_time'))),
+                    last_buy_time=self._parse_datetime_value(
+                        item.get('last_buy_time', item.get('transact_time', item.get('buy_time', item.get('init_time'))))
+                    ),
                 )
                 target.positions[security] = position
                 if stock_subportfolio is not None:

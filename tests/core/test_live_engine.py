@@ -2009,6 +2009,34 @@ async def test_live_engine_triggers_broker_lifecycle_hooks_at_safe_markers(tmp_p
     assert broker.after_close_calls == 1
 
 
+def test_live_engine_apply_account_snapshot_sets_position_buy_times(tmp_path):
+    engine = _build_v2_live_engine(tmp_path, DummyBroker())
+    target = engine.portfolio_proxy.backing if isinstance(engine.context.portfolio, LivePortfolioProxy) else engine.context.portfolio
+
+    engine._apply_account_snapshot(
+        {
+            "available_cash": 452.0,
+            "total_value": 20097.2,
+            "positions": [
+                {
+                    "security": "159915.XSHE",
+                    "amount": 5400,
+                    "closeable_amount": 0,
+                    "avg_cost": 3.620,
+                    "current_price": 3.634,
+                    "market_value": 19623.6,
+                    "init_time": "2026-04-21T09:40:00",
+                    "transact_time": "2026-04-21T10:36:00",
+                }
+            ],
+        }
+    )
+
+    position = target.positions["159915.XSHE"]
+    assert position.buy_time == datetime(2026, 4, 21, 9, 40, 0)
+    assert position.last_buy_time == datetime(2026, 4, 21, 10, 36, 0)
+
+
 @pytest.mark.asyncio
 async def test_live_engine_does_not_backfill_broker_before_open_after_market_open(tmp_path):
     strategy = _write_strategy(tmp_path)
