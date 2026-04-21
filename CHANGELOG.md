@@ -3,6 +3,32 @@
 本文档记录所有重要的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.0] - 2026-04-21
+
+### 新增
+- **远程 QMT 运行时探针**：新增 `bullet_trade.server.runtime_probe` 与 `helpers/remote_qmt_runtime_probe.py`，支持对远程 server 的协议、字段、行情、账户、委托/成交链路做巡检，输出 JSON / Markdown 报告，并可选执行最小化下单 smoke
+- **服务端撤单风控与幂等保护**：远程服务新增撤单次数/频率限制、下单幂等控制及对应环境变量配置，降低重复下单和高频撤单风险
+- **实盘 broker 生命周期钩子**：`BrokerBase` 新增 `before_open/after_close` 可选钩子，`LiveEngine` 在盘前与盘后安全触发，兼容现有 broker 实现
+- **回测 benchmark 与超额收益分析**：报告新增 benchmark 收益率、年化 benchmark 收益率、累计超额收益率，并在 HTML 报告中展示 benchmark 叠加曲线与超额收益图表
+
+### 修复
+- **实盘启动互斥与配置解析**：实盘启动增加 runtime / 实例级锁，避免重复启动；布尔配置统一走 `parse_bool`，风险控制初始化更稳定
+- **订单状态与成交语义**：修复订单成本计算，保留订单结算状态，区分市价单请求价与券商价，并补齐委托价、均价、成交价等订单元数据
+- **账户同步准确性**：同步子账户现金、可用/冻结资金与持仓到 `stock` subportfolio，保留持仓 `buy_time/last_buy_time`，优化买入时间处理
+- **日志与输出稳定性**：减少同步持仓日志刷屏，`backtest ... --auto-report` 不再覆盖默认 `report.html`
+
+### 增强
+- **QMT / 远程适配兼容性**：`QmtDataAdapter` 兼容 `start/end` 与 `start_date/end_date` 字段名；MiniQMT 增强证券类型归一化与基金别名支持；远程 `security_info` 支持扁平化响应
+- **下单能力扩展**：新增 `MarketOrderStyle` / `LimitOrderStyle` 支持，并为 broker 适配层补充更多调试信息与订单链路校验
+- **回测报告展示**：总资产图新增超额资产叠加曲线，月度/日历视图更紧凑，日志支持紧凑格式并隐藏具体时间戳
+- **依赖补全**：补充缺失运行依赖，减少新环境安装遗漏
+
+### 文档
+- **文档重整与修正**：更新 `quickstart`、`config`、`live`、`backtest`、`qmt-server` 等文档，补充风控配置、CLI 行为与使用说明，并修正文档错误
+
+### 测试
+- **回归覆盖扩大**：新增/补强 runtime probe、live engine、QMT broker/server adapter、撤单风控、报告渲染、CLI `--auto-report`、证券信息兼容等测试
+
 ## [0.6.6] - 2026-02-12
 
 ### 新增
